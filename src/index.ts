@@ -1,0 +1,95 @@
+#!/usr/bin/env bun
+
+import { Command } from "commander";
+import pkg from "../package.json";
+import {
+  getRegistrationStatus,
+  registerHabitat,
+  unregisterHabitat,
+} from "./habitat";
+
+const program = new Command();
+
+function printError(error: unknown) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}
+
+program
+  .name("habitat")
+  .description("Register and manage this local Habitat CLI with the Kepler Planet Server.")
+  .version(pkg.version)
+  .showHelpAfterError("(run `habitat --help` for usage)")
+  .addHelpText(
+    "after",
+    `
+
+Configuration:
+  Reads KEPLER_BASE_URL and KEPLER_PLANET_TOKEN from .env.
+  Stores registration data in .habitat/registration.json.
+
+Examples:
+  habitat register --name "Artemis Ridge"
+  habitat status
+  habitat unregister`,
+  );
+
+program
+  .command("register")
+  .description("Register this habitat with the Kepler Planet Server.")
+  .requiredOption("--name <habitat name>", "Habitat display name")
+  .action(async (options: { name: string }) => {
+    try {
+      const registration = await registerHabitat(options.name);
+      console.log(`Registered habitat: ${registration.displayName}`);
+      console.log(`Habitat ID: ${registration.habitatId}`);
+      console.log("Local registration: .habitat/registration.json");
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+program
+  .command("status")
+  .description("Show this habitat registration status from Kepler.")
+  .action(async () => {
+    try {
+      const status = await getRegistrationStatus();
+      const habitat = status.habitat;
+
+      console.log(`Habitat ID: ${habitat.id}`);
+      console.log(`Slug: ${habitat.habitatSlug}`);
+      console.log(`Name: ${habitat.displayName}`);
+      console.log(`Catalog Version: ${habitat.catalogVersion}`);
+      console.log(`Status: ${habitat.status}`);
+      console.log(`Last Seen: ${habitat.lastSeenAt ?? "never"}`);
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+program
+  .command("unregister")
+  .description("Unregister this habitat from Kepler and remove the local registration file.")
+  .action(async () => {
+    try {
+      const result = await unregisterHabitat();
+      console.log(`Unregistered habitat: ${result.habitatId}`);
+      console.log("Removed local registration: .habitat/registration.json");
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+program
+  .command("* [commandParts...]", { hidden: true })
+  .description("Handle unknown commands.")
+  .allowUnknownOption(true)
+  .action((commandParts: string[]) => {
+    const commandName = commandParts.join(" ");
+    console.error(`Unknown command: ${commandName}`);
+    console.error("Try `habitat --help`.");
+    process.exitCode = 1;
+  });
+
+await program.parseAsync();

@@ -1,0 +1,20 @@
+{
+  "name": "habitat",
+  "version": "0.1.0",
+  "description": "A tiny Habitat CLI built with Bun and TypeScript.",
+  "type": "module",
+  "bin": {
+    "habitat": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "commander": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^5.9.2"
+  }
+}
