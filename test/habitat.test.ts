@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,12 +7,15 @@ import {
   createModule,
   deleteModule,
   getLocalStatusSummary,
+  getModulesFilePath,
   getRegistrationFilePath,
   getRegistrationStatus,
   listModules,
   loadLocalRegistration,
   registerHabitat,
+  setModuleStatus,
   showModule,
+  tickHabitat,
   unregisterHabitat,
   updateModule,
 } from "../src/habitat";
@@ -31,6 +34,88 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
+
+async function writePowerRegistration({
+  currentEnergyKwh = 10,
+  energyStorageKwh = 10,
+}: {
+  currentEnergyKwh?: number;
+  energyStorageKwh?: number;
+} = {}) {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 0,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "battery-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "basic-battery",
+            moduleType: "basic-battery",
+            displayName: "Basic Battery",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "offline",
+              currentEnergyKwh,
+              energyStorageKwh,
+              powerDrawKw: { offline: 0, active: 0 },
+            },
+            capabilities: ["power-storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "command-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "command-module",
+            moduleType: "command-module",
+            displayName: "Command Module",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { offline: 0, idle: 1, active: 2, damaged: 0 },
+            },
+            capabilities: ["habitat-command"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "life-support-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "life-support",
+            moduleType: "life-support",
+            displayName: "Life Support",
+            connectedTo: ["command-1"],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { offline: 0, active: 5 },
+            },
+            capabilities: ["atmosphere-control"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
 
 test("registerHabitat sends OpenAPI request keys and persists returned registration data", async () => {
   const requests: Array<{ url: string; init: RequestInit }> = [];
@@ -96,6 +181,7 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     habitatId: "habitat_11111111_1111_4111_8111_111111111111",
     displayName: "Artemis Ridge",
     registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
   });
   expect(registration.modules).toEqual([
     {
@@ -131,6 +217,48 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
 
   const rawFile = await readFile(getRegistrationFilePath(tempDir), "utf8");
   expect(JSON.parse(rawFile)).toEqual(registration);
+});
+
+test("tickHabitat advances one-second ticks and drains battery power", async () => {
+  await writePowerRegistration();
+
+  const result = await tickHabitat(1, { cwd: tempDir });
+
+  expect(result).toMatchObject({
+    startTick: 0,
+    currentTick: 1,
+    ticksAdvanced: 1,
+    totalPowerDrawKw: 7,
+    energyUsedKwh: 7 / 3600,
+    batteryEnergyKwh: 10 - 7 / 3600,
+    batteryCapacityKwh: 10,
+    powerShortageKwh: 0,
+  });
+
+  const stored = await loadLocalRegistration(tempDir);
+  expect(stored?.currentTick).toBe(1);
+  expect(stored?.modules[0].runtimeAttributes.currentEnergyKwh).toBe(10 - 7 / 3600);
+  expect(stored?.tickHistory).toHaveLength(1);
+});
+
+test("tickHabitat multiplies power use over multiple ticks", async () => {
+  await writePowerRegistration();
+
+  const result = await tickHabitat(60, { cwd: tempDir });
+
+  expect(result.energyUsedKwh).toBe(7 / 60);
+  expect(result.batteryEnergyKwh).toBe(10 - 7 / 60);
+  expect(result.currentTick).toBe(60);
+});
+
+test("tickHabitat clamps battery energy and reports shortage", async () => {
+  await writePowerRegistration({ currentEnergyKwh: 0.001, energyStorageKwh: 10 });
+
+  const result = await tickHabitat(1, { cwd: tempDir });
+
+  expect(result.batteryEnergyKwh).toBe(0);
+  expect(result.powerShortageKwh).toBeCloseTo(7 / 3600 - 0.001, 10);
+  expect((await loadLocalRegistration(tempDir))?.modules[0].runtimeAttributes.currentEnergyKwh).toBe(0);
 });
 
 test("module CRUD uses local modules and saved module blueprints", async () => {
@@ -228,6 +356,34 @@ test("module CRUD uses local modules and saved module blueprints", async () => {
   ]);
 });
 
+test("setModuleStatus updates only runtime status and saves habitat modules", async () => {
+  await writePowerRegistration();
+
+  const before = await showModule("command-1", { cwd: tempDir });
+  const updated = await setModuleStatus("command-1", "idle", { cwd: tempDir });
+
+  expect(updated.id).toBe("command-1");
+  expect(updated.runtimeAttributes.status).toBe("idle");
+  expect(updated.runtimeAttributes.health).toBe(before.runtimeAttributes.health);
+  expect(updated.runtimeAttributes.powerDrawKw).toEqual(before.runtimeAttributes.powerDrawKw);
+  expect(updated.displayName).toBe(before.displayName);
+  expect(updated.updatedAt).toBe(before.updatedAt);
+
+  const storedRegistration = await loadLocalRegistration(tempDir);
+  expect(storedRegistration?.modules.find((module) => module.id === "command-1")?.runtimeAttributes.status).toBe("idle");
+
+  const storedModules = JSON.parse(await readFile(getModulesFilePath(tempDir), "utf8"));
+  expect(storedModules.find((module: { id: string }) => module.id === "command-1").runtimeAttributes.status).toBe("idle");
+});
+
+test("setModuleStatus rejects unsupported runtime states", async () => {
+  await writePowerRegistration();
+
+  await expect(setModuleStatus("command-1", "sleeping", { cwd: tempDir })).rejects.toThrow(
+    "Status must be one of: offline, idle, online, active, damaged.",
+  );
+});
+
 test("getLocalStatusSummary reports the local module count", async () => {
   await registerHabitat("Artemis Ridge", {
     cwd: tempDir,
@@ -262,7 +418,15 @@ test("getLocalStatusSummary reports the local module count", async () => {
   });
 
   expect(await getLocalStatusSummary({ cwd: tempDir })).toEqual({
+    currentTick: 0,
     moduleCount: 2,
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
   });
 });
 

@@ -10,7 +10,9 @@ import {
   getRegistrationStatus,
   listModules,
   registerHabitat,
+  setModuleStatus,
   showModule,
+  tickHabitat,
   unregisterHabitat,
   updateModule,
   type HabitatModule,
@@ -33,12 +35,63 @@ function parseHealth(value: string) {
   return health;
 }
 
+function parseTickCount(value: string) {
+  const count = Number(value);
+
+  if (!Number.isInteger(count) || count <= 0) {
+    throw new Error("tick count must be a positive integer");
+  }
+
+  return count;
+}
+
+function formatNumber(value: number) {
+  return Number(value.toFixed(5)).toString();
+}
+
 function moduleStatus(module: HabitatModule) {
   return String(module.runtimeAttributes.status ?? "unknown");
 }
 
 function moduleHealth(module: HabitatModule) {
   return String(module.runtimeAttributes.health ?? "unknown");
+}
+
+function modulePowerDrawKw(module: HabitatModule) {
+  const status = moduleStatus(module);
+  const powerDrawKw = module.runtimeAttributes.powerDrawKw;
+
+  if (!powerDrawKw || typeof powerDrawKw !== "object" || Array.isArray(powerDrawKw)) {
+    return 0;
+  }
+
+  const draw = (powerDrawKw as Record<string, unknown>)[status];
+  return typeof draw === "number" && Number.isFinite(draw) ? draw : 0;
+}
+
+function printModuleStatusTable(modules: HabitatModule[]) {
+  const rows = modules.map((module) => ({
+    name: module.displayName,
+    state: moduleStatus(module),
+    powerDrawKw: modulePowerDrawKw(module),
+  }));
+  const nameWidth = Math.max("Module".length, ...rows.map((row) => row.name.length));
+  const stateWidth = Math.max("State".length, ...rows.map((row) => row.state.length));
+  const totalPowerDrawKw = rows.reduce((total, row) => total + row.powerDrawKw, 0);
+  const energyCostPerTickKwh = totalPowerDrawKw / 3600;
+
+  console.log(`${"Module".padEnd(nameWidth)}  ${"State".padEnd(stateWidth)}  Power Draw`);
+  console.log(`${"-".repeat(nameWidth)}  ${"-".repeat(stateWidth)}  ----------`);
+
+  for (const row of rows) {
+    console.log(
+      `${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${formatNumber(row.powerDrawKw)} kW`,
+    );
+  }
+
+  console.log("");
+  console.log(`Total Power Draw: ${formatNumber(totalPowerDrawKw)} kW`);
+  console.log(`Energy Cost Per Tick: ${formatNumber(energyCostPerTickKwh)} kWh`);
 }
 
 function printModule(module: HabitatModule) {
@@ -109,6 +162,7 @@ Examples:
   habitat status
   habitat unregister
   habitat config
+  habitat tick 60
   habitat module list`,
   );
 
@@ -156,7 +210,33 @@ program
       console.log(`Catalog Version: ${habitat.catalogVersion}`);
       console.log(`Status: ${habitat.status}`);
       console.log(`Last Seen: ${habitat.lastSeenAt ?? "never"}`);
+      console.log(`Current Tick: ${summary.currentTick}`);
       console.log(`Modules: ${summary.moduleCount}`);
+      console.log(`Total Power Draw: ${formatNumber(summary.powerSummary.totalPowerDrawKw)} kW`);
+      console.log(
+        `Battery Energy: ${formatNumber(summary.powerSummary.batteryEnergyKwh)} / ${formatNumber(summary.powerSummary.batteryCapacityKwh)} kWh`,
+      );
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+program
+  .command("tick")
+  .description("Advance the local habitat power simulation by one-second ticks.")
+  .argument("<count>", "Positive integer number of one-second ticks", parseTickCount)
+  .action(async (count: number) => {
+    try {
+      const result = await tickHabitat(count);
+
+      console.log(`Ticks Advanced: ${result.ticksAdvanced}`);
+      console.log(`Current Tick: ${result.currentTick}`);
+      console.log(`Total Power Draw: ${formatNumber(result.totalPowerDrawKw)} kW`);
+      console.log(`Energy Used: ${formatNumber(result.energyUsedKwh)} kWh`);
+      console.log(
+        `Battery Energy: ${formatNumber(result.batteryEnergyKwh)} / ${formatNumber(result.batteryCapacityKwh)} kWh`,
+      );
+      console.log(`Power Shortage: ${formatNumber(result.powerShortageKwh)} kWh`);
     } catch (error) {
       printError(error);
     }
@@ -193,6 +273,40 @@ moduleCommand
           `${index} | ${moduleHandle(module, modules)} | ${module.displayName} | ${moduleStatus(module)} | ${moduleHealth(module)}`,
         );
       }
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+moduleCommand
+  .command("status")
+  .description("Show each module's current state and power draw.")
+  .action(async () => {
+    try {
+      const modules = await listModules();
+
+      if (modules.length === 0) {
+        console.log("No modules found.");
+        return;
+      }
+
+      printModuleStatusTable(modules);
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+moduleCommand
+  .command("set-status")
+  .description("Set one local module runtime state.")
+  .argument("<module-id>", "Module id, number from list, or friendly module handle")
+  .argument("<status>", "One of: offline, idle, online, active, damaged")
+  .action(async (moduleHandle: string, status: string) => {
+    try {
+      const id = await resolveModuleId(moduleHandle);
+      const module = await setModuleStatus(id, status);
+      console.log(`Updated module ${module.id} to ${moduleStatus(module)}.`);
+      console.log(`Current Power Draw: ${formatNumber(modulePowerDrawKw(module))} kW`);
     } catch (error) {
       printError(error);
     }
