@@ -21,11 +21,46 @@ export type StarterModule = {
 };
 
 export type ProductionBlueprint = {
+  id?: string;
   blueprintId: string;
   displayName: string;
+  description?: string;
+  status?: "draft" | "published" | string;
   output?: JsonObject;
+  inputs?: JsonObject;
+  productionCost?: JsonObject;
+  requiredFacility?: JsonObject;
+  buildTicks?: number;
+  prerequisites?: string[];
+  unlocks?: string[];
+  repeatable?: boolean;
+  level?: number | null;
+  target?: JsonObject;
+  facilityLevel?: JsonObject;
+  attachmentPoints?: JsonObject;
+  attachmentRequirements?: JsonObject[];
   runtimeAttributes?: JsonObject;
   capabilities?: string[];
+};
+
+export type BlueprintCatalogResponse = {
+  catalogVersion: string;
+  blueprints: ProductionBlueprint[];
+};
+
+export type IndustryResource = {
+  id?: string;
+  resourceType: string;
+  displayName: string;
+  kind: string;
+  rarity: string;
+  description?: string;
+  unit?: string;
+};
+
+export type ResourceCatalogResponse = {
+  catalogVersion: string;
+  resources: IndustryResource[];
 };
 
 export type HabitatModule = {
@@ -436,6 +471,76 @@ async function loadRequiredRegistration(options: RuntimeOptions = {}) {
 export async function listModules(options: RuntimeOptions = {}) {
   const { registration } = await loadRequiredRegistration(options);
   return registration.modules;
+}
+
+export async function listBlueprintCatalog(options: RuntimeOptions = {}): Promise<BlueprintCatalogResponse> {
+  const cwd = await resolveProjectRoot(
+    options.cwd ?? process.cwd(),
+    options.projectRoot,
+  );
+  const config = await loadConfig(cwd);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${config.baseUrl}/catalog/blueprints`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+    },
+  });
+
+  await assertOk(response, "Blueprint catalog request");
+  const body = await parseJsonResponse(response);
+
+  return {
+    catalogVersion: String(body.catalogVersion ?? ""),
+    blueprints: Array.isArray(body.blueprints) ? body.blueprints : [],
+  };
+}
+
+export async function listResourceCatalog(options: RuntimeOptions = {}): Promise<ResourceCatalogResponse> {
+  const cwd = await resolveProjectRoot(
+    options.cwd ?? process.cwd(),
+    options.projectRoot,
+  );
+  const config = await loadConfig(cwd);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${config.baseUrl}/catalog/resources`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+    },
+  });
+
+  await assertOk(response, "Resource catalog request");
+  const body = await parseJsonResponse(response);
+
+  return {
+    catalogVersion: String(body.catalogVersion ?? ""),
+    resources: Array.isArray(body.resources) ? body.resources : [],
+  };
+}
+
+export async function showBlueprint(id: string, options: RuntimeOptions = {}) {
+  const cwd = await resolveProjectRoot(
+    options.cwd ?? process.cwd(),
+    options.projectRoot,
+  );
+  const config = await loadConfig(cwd);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${config.baseUrl}/catalog/blueprints/${encodeURIComponent(id)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+    },
+  });
+
+  if (response.status === 404) {
+    throw new Error(`Blueprint not found: ${id}`);
+  }
+
+  await assertOk(response, "Blueprint request");
+  const body = await parseJsonResponse(response);
+
+  return body.blueprint as ProductionBlueprint;
 }
 
 export async function getLocalStatusSummary(options: RuntimeOptions = {}) {

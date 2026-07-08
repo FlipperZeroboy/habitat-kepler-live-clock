@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-test("help advertises only Kepler registration commands from the Habitat command set", async () => {
+test("help advertises Kepler registration, catalog, and local module commands", async () => {
   const proc = Bun.spawn(["bun", "run", "src/index.ts", "--help"], {
     cwd: process.cwd(),
     stdout: "pipe",
@@ -20,6 +20,8 @@ test("help advertises only Kepler registration commands from the Habitat command
   expect(output).toContain("status");
   expect(output).toContain("unregister");
   expect(output).toContain("config");
+  expect(output).toContain("blueprint");
+  expect(output).toContain("resource");
   expect(output).toContain("module");
   expect(output).not.toContain("zone");
   expect(output).not.toContain("door");
@@ -30,6 +32,7 @@ test("help advertises only Kepler registration commands from the Habitat command
 });
 
 let tempDir: string;
+let server: ReturnType<typeof Bun.serve> | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "habitat-cli-"));
@@ -154,7 +157,198 @@ async function writeTickRegistration() {
 }
 
 afterEach(async () => {
+  server?.stop(true);
+  server = undefined;
   await rm(tempDir, { recursive: true, force: true });
+});
+
+function startBlueprintCatalogServer() {
+  server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+
+      if (request.headers.get("authorization") !== "Bearer test-token") {
+        return Response.json({ error: { message: "unauthorized" } }, { status: 401 });
+      }
+
+      if (url.pathname === "/catalog/blueprints") {
+        return Response.json({
+          catalogVersion: "2026-06-24",
+          blueprints: [
+            {
+              id: "bp-1",
+              blueprintId: "survey-rover",
+              displayName: "Survey Rover",
+              description: "Builds a rover for site surveys.",
+              status: "published",
+              output: { itemType: "rover", quantity: 1 },
+              inputs: { spareParts: 4 },
+              buildTicks: 120,
+              repeatable: true,
+            },
+            {
+              id: "bp-2",
+              blueprintId: "rover-bay-upgrade",
+              displayName: "Rover Bay Upgrade",
+              description: "Upgrades the rover bay.",
+              status: "published",
+              output: { itemType: "facility-upgrade", quantity: 1 },
+              inputs: { spareParts: 8, power: 3 },
+              requiredFacility: { moduleType: "rover-bay", level: 1 },
+              buildTicks: 300,
+              repeatable: false,
+            },
+          ],
+        });
+      }
+
+      if (url.pathname === "/catalog/resources") {
+        return Response.json({
+          catalogVersion: "2026-06-24",
+          resources: [
+            {
+              id: "resource-water",
+              resourceType: "water",
+              displayName: "Water",
+              kind: "consumable",
+              rarity: "common",
+              description: "Reusable life-support water.",
+              unit: "liters",
+            },
+            {
+              id: "resource-spare-parts",
+              resourceType: "spare-parts",
+              displayName: "Spare Parts",
+              kind: "manufactured",
+              rarity: "uncommon",
+              description: "General repair and build components.",
+              unit: "parts",
+            },
+          ],
+        });
+      }
+
+      if (url.pathname === "/catalog/blueprints/survey-rover") {
+        return Response.json({
+          blueprint: {
+            id: "bp-1",
+            blueprintId: "survey-rover",
+            displayName: "Survey Rover",
+            description: "Builds a rover for site surveys.",
+            status: "published",
+            output: { itemType: "rover", quantity: 1 },
+            inputs: { spareParts: 4 },
+            productionCost: { powerKwh: 7 },
+            requiredFacility: { moduleType: "rover-bay", level: 1 },
+            buildTicks: 120,
+            prerequisites: ["rover-bay"],
+            unlocks: ["site-survey"],
+            repeatable: true,
+            capabilities: ["resource-survey"],
+          },
+        });
+      }
+
+      return Response.json({ error: { message: "not found" } }, { status: 404 });
+    },
+  });
+
+  return `http://${server.hostname}:${server.port}`;
+}
+
+test("blueprint list and show read the Kepler catalog without changing local state", async () => {
+  const baseUrl = startBlueprintCatalogServer();
+  await writeFile(
+    join(tempDir, ".env"),
+    `KEPLER_BASE_URL=${baseUrl}\nKEPLER_PLANET_TOKEN=test-token\n`,
+    "utf8",
+  );
+  const beforeRegistration = await readFile(join(tempDir, ".habitat", "registration.json"), "utf8");
+
+  const listProc = Bun.spawn(["bun", "run", "src/index.ts", "blueprint", "list"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const listOutput = await new Response(listProc.stdout).text();
+  const listErrorOutput = await new Response(listProc.stderr).text();
+  expect(await listProc.exited).toBe(0);
+  expect(listErrorOutput).toBe("");
+  expect(listOutput).toContain("Blueprint ID");
+  expect(listOutput).toContain("Name");
+  expect(listOutput).toContain("Build Ticks");
+  expect(listOutput).toContain("survey-rover");
+  expect(listOutput).toContain("Survey Rover");
+  expect(listOutput).toContain("rover-bay-upgrade");
+
+  const showProc = Bun.spawn(["bun", "run", "src/index.ts", "blueprint", "show", "survey-rover"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const showOutput = await new Response(showProc.stdout).text();
+  const showErrorOutput = await new Response(showProc.stderr).text();
+  expect(await showProc.exited).toBe(0);
+  expect(showErrorOutput).toBe("");
+  expect(showOutput).toContain("ID: survey-rover");
+  expect(showOutput).toContain("Name: Survey Rover");
+  expect(showOutput).toContain("Description: Builds a rover for site surveys.");
+  expect(showOutput).toContain("Build Ticks: 120");
+  expect(showOutput).toContain("Inputs: {\"spareParts\":4}");
+  expect(showOutput).toContain("Required Facility: {\"moduleType\":\"rover-bay\",\"level\":1}");
+  expect(showOutput).toContain("Capabilities: resource-survey");
+
+  const missingProc = Bun.spawn(["bun", "run", "src/index.ts", "blueprint", "show", "missing-blueprint"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const missingOutput = await new Response(missingProc.stdout).text();
+  const missingErrorOutput = await new Response(missingProc.stderr).text();
+  expect(await missingProc.exited).toBe(1);
+  expect(missingOutput).toBe("");
+  expect(missingErrorOutput).toContain("Blueprint not found: missing-blueprint");
+  expect(await readFile(join(tempDir, ".habitat", "registration.json"), "utf8")).toBe(beforeRegistration);
+});
+
+test("resource list reads possible Kepler resource types without creating inventory", async () => {
+  const baseUrl = startBlueprintCatalogServer();
+  await writeFile(
+    join(tempDir, ".env"),
+    `KEPLER_BASE_URL=${baseUrl}\nKEPLER_PLANET_TOKEN=test-token\n`,
+    "utf8",
+  );
+  const beforeRegistration = await readFile(join(tempDir, ".habitat", "registration.json"), "utf8");
+
+  const proc = Bun.spawn(["bun", "run", "src/index.ts", "resource", "list"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const output = await new Response(proc.stdout).text();
+  const errorOutput = await new Response(proc.stderr).text();
+  expect(await proc.exited).toBe(0);
+  expect(errorOutput).toBe("");
+  expect(output).toContain("Resource catalog: possible resource types in the Kepler world.");
+  expect(output).toContain("Local inventory: resources your habitat owns will be handled later.");
+  expect(output).toContain("Blueprint requirements: resources or modules needed to build something later.");
+  expect(output).toContain("Resource Type");
+  expect(output).toContain("water");
+  expect(output).toContain("Water");
+  expect(output).toContain("liters");
+  expect(output).toContain("spare-parts");
+  expect(output).not.toContain("You own");
+  expect(output).not.toContain("Inventory");
+  expect(await readFile(join(tempDir, ".habitat", "registration.json"), "utf8")).toBe(beforeRegistration);
 });
 
 test("module list and show print local module state", async () => {

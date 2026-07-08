@@ -4,145 +4,18 @@ import { Command } from "commander";
 import pkg from "../package.json";
 import {
   checkLocalConfig,
-  createModule,
-  deleteModule,
   getLocalStatusSummary,
   getRegistrationStatus,
-  listModules,
   registerHabitat,
-  setModuleStatus,
-  showModule,
   tickHabitat,
   unregisterHabitat,
-  updateModule,
-  type HabitatModule,
 } from "./habitat";
+import { createBlueprintCommand } from "./commands/blueprint";
+import { createModuleCommand } from "./commands/module";
+import { createResourceCommand } from "./commands/resource";
+import { formatNumber, parseTickCount, printError } from "./cli-utils";
 
 const program = new Command();
-
-function printError(error: unknown) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-}
-
-function parseHealth(value: string) {
-  const health = Number(value);
-
-  if (Number.isNaN(health)) {
-    throw new Error("health must be a number");
-  }
-
-  return health;
-}
-
-function parseTickCount(value: string) {
-  const count = Number(value);
-
-  if (!Number.isInteger(count) || count <= 0) {
-    throw new Error("tick count must be a positive integer");
-  }
-
-  return count;
-}
-
-function formatNumber(value: number) {
-  return Number(value.toFixed(5)).toString();
-}
-
-function moduleStatus(module: HabitatModule) {
-  return String(module.runtimeAttributes.status ?? "unknown");
-}
-
-function moduleHealth(module: HabitatModule) {
-  return String(module.runtimeAttributes.health ?? "unknown");
-}
-
-function modulePowerDrawKw(module: HabitatModule) {
-  const status = moduleStatus(module);
-  const powerDrawKw = module.runtimeAttributes.powerDrawKw;
-
-  if (!powerDrawKw || typeof powerDrawKw !== "object" || Array.isArray(powerDrawKw)) {
-    return 0;
-  }
-
-  const draw = (powerDrawKw as Record<string, unknown>)[status];
-  return typeof draw === "number" && Number.isFinite(draw) ? draw : 0;
-}
-
-function printModuleStatusTable(modules: HabitatModule[]) {
-  const rows = modules.map((module) => ({
-    name: module.displayName,
-    state: moduleStatus(module),
-    powerDrawKw: modulePowerDrawKw(module),
-  }));
-  const nameWidth = Math.max("Module".length, ...rows.map((row) => row.name.length));
-  const stateWidth = Math.max("State".length, ...rows.map((row) => row.state.length));
-  const totalPowerDrawKw = rows.reduce((total, row) => total + row.powerDrawKw, 0);
-  const energyCostPerTickKwh = totalPowerDrawKw / 3600;
-
-  console.log(`${"Module".padEnd(nameWidth)}  ${"State".padEnd(stateWidth)}  Power Draw`);
-  console.log(`${"-".repeat(nameWidth)}  ${"-".repeat(stateWidth)}  ----------`);
-
-  for (const row of rows) {
-    console.log(
-      `${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${formatNumber(row.powerDrawKw)} kW`,
-    );
-  }
-
-  console.log("");
-  console.log(`Total Power Draw: ${formatNumber(totalPowerDrawKw)} kW`);
-  console.log(`Energy Cost Per Tick: ${formatNumber(energyCostPerTickKwh)} kWh`);
-}
-
-function printModule(module: HabitatModule) {
-  console.log(`ID: ${module.id}`);
-  console.log(`Habitat ID: ${module.habitatId}`);
-  console.log(`Blueprint ID: ${module.blueprintId}`);
-  console.log(`Module Type: ${module.moduleType}`);
-  console.log(`Name: ${module.displayName}`);
-  console.log(`Source: ${module.source}`);
-  console.log(`Status: ${moduleStatus(module)}`);
-  console.log(`Health: ${moduleHealth(module)}`);
-  console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
-  console.log(`Connected To: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
-  console.log(`Runtime Attributes: ${JSON.stringify(module.runtimeAttributes)}`);
-}
-
-function moduleHandle(module: HabitatModule, modules: HabitatModule[]) {
-  const sameTypeModules = modules.filter(
-    (entry) => entry.moduleType === module.moduleType,
-  );
-  const typeIndex = sameTypeModules.indexOf(module) + 1;
-
-  return `${module.moduleType}-${typeIndex}`;
-}
-
-async function resolveModuleId(handle: string) {
-  const modules = await listModules();
-  const index = Number(handle);
-
-  if (Number.isInteger(index) && index > 0 && String(index) === handle) {
-    const module = modules[index - 1];
-
-    if (!module) {
-      throw new Error(`Module number not found: ${handle}`);
-    }
-
-    return module.id;
-  }
-
-  const module = modules.find((entry) => moduleHandle(entry, modules) === handle);
-
-  if (module) {
-    return module.id;
-  }
-
-  return handle;
-}
-
-const moduleCommand = new Command("module")
-  .description("Manage local Habitat modules.")
-  .summary("CRUD for local modules");
 
 program
   .name("habitat")
@@ -163,6 +36,8 @@ Examples:
   habitat unregister
   habitat config
   habitat tick 60
+  habitat blueprint list
+  habitat resource list
   habitat module list`,
   );
 
@@ -255,135 +130,9 @@ program
     }
   });
 
-moduleCommand
-  .command("list")
-  .description("List local modules as: id | blueprintId | displayName | status | health.")
-  .action(async () => {
-    try {
-      const modules = await listModules();
-
-      if (modules.length === 0) {
-        console.log("No modules found.");
-        return;
-      }
-
-      for (const module of modules) {
-        const index = modules.indexOf(module) + 1;
-        console.log(
-          `${index} | ${moduleHandle(module, modules)} | ${module.displayName} | ${moduleStatus(module)} | ${moduleHealth(module)}`,
-        );
-      }
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-moduleCommand
-  .command("status")
-  .description("Show each module's current state and power draw.")
-  .action(async () => {
-    try {
-      const modules = await listModules();
-
-      if (modules.length === 0) {
-        console.log("No modules found.");
-        return;
-      }
-
-      printModuleStatusTable(modules);
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-moduleCommand
-  .command("set-status")
-  .description("Set one local module runtime state.")
-  .argument("<module-id>", "Module id, number from list, or friendly module handle")
-  .argument("<status>", "One of: offline, idle, online, active, damaged")
-  .action(async (moduleHandle: string, status: string) => {
-    try {
-      const id = await resolveModuleId(moduleHandle);
-      const module = await setModuleStatus(id, status);
-      console.log(`Updated module ${module.id} to ${moduleStatus(module)}.`);
-      console.log(`Current Power Draw: ${formatNumber(modulePowerDrawKw(module))} kW`);
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-moduleCommand
-  .command("show")
-  .description("Show one local module by id.")
-  .argument("<module>", "Module number from list, or full module id")
-  .action(async (moduleHandle: string) => {
-    try {
-      const id = await resolveModuleId(moduleHandle);
-      printModule(await showModule(id));
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-moduleCommand
-  .command("create")
-  .description("Create a local module from a saved module blueprint.")
-  .requiredOption("--blueprint-id <id>", "Saved blueprint id")
-  .option("--name <name>", "Module display name")
-  .action(async (options: { blueprintId: string; name?: string }) => {
-    try {
-      const module = await createModule({
-        blueprintId: options.blueprintId,
-        name: options.name,
-      });
-      console.log(`Created module: ${module.id}`);
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-moduleCommand
-  .command("update")
-  .description("Update a local module name, status, or health.")
-  .argument("<module>", "Module number from list, or full module id")
-  .option("--name <name>", "Module display name")
-  .option("--status <status>", "Runtime status")
-  .option("--health <number>", "Runtime health", parseHealth)
-  .option("--condition <number>", "Runtime condition; alias for --health", parseHealth)
-  .action(
-    async (
-      moduleHandle: string,
-      options: { name?: string; status?: string; health?: number; condition?: number },
-    ) => {
-      try {
-        const id = await resolveModuleId(moduleHandle);
-        const module = await updateModule(id, {
-          name: options.name,
-          status: options.status,
-          health: options.health ?? options.condition,
-        });
-        console.log(`Updated module: ${module.id}`);
-      } catch (error) {
-        printError(error);
-      }
-    },
-  );
-
-moduleCommand
-  .command("delete")
-  .description("Delete a local module by id.")
-  .argument("<module>", "Module number from list, or full module id")
-  .action(async (moduleHandle: string) => {
-    try {
-      const id = await resolveModuleId(moduleHandle);
-      await deleteModule(id);
-      console.log(`Deleted module: ${id}`);
-    } catch (error) {
-      printError(error);
-    }
-  });
-
-program.addCommand(moduleCommand);
+program.addCommand(createBlueprintCommand());
+program.addCommand(createResourceCommand());
+program.addCommand(createModuleCommand());
 
 program
   .command("* [commandParts...]", { hidden: true })

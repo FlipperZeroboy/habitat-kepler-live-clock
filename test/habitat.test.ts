@@ -6,6 +6,8 @@ import {
   checkLocalConfig,
   createModule,
   deleteModule,
+  listBlueprintCatalog,
+  listResourceCatalog,
   getLocalStatusSummary,
   getModulesFilePath,
   getRegistrationFilePath,
@@ -14,6 +16,7 @@ import {
   loadLocalRegistration,
   registerHabitat,
   setModuleStatus,
+  showBlueprint,
   showModule,
   tickHabitat,
   unregisterHabitat,
@@ -217,6 +220,137 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
 
   const rawFile = await readFile(getRegistrationFilePath(tempDir), "utf8");
   expect(JSON.parse(rawFile)).toEqual(registration);
+});
+
+test("listBlueprintCatalog fetches official blueprints without changing local state", async () => {
+  await writePowerRegistration();
+  const beforeRegistration = await readFile(getRegistrationFilePath(tempDir), "utf8");
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+
+  const result = await listBlueprintCatalog({
+    cwd: tempDir,
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init: init ?? {} });
+
+      return new Response(
+        JSON.stringify({
+          catalogVersion: "2026-06-24",
+          blueprints: [
+            {
+              id: "bp-1",
+              blueprintId: "survey-rover",
+              displayName: "Survey Rover",
+              description: "Builds a rover for site surveys.",
+              status: "published",
+              output: { itemType: "rover", quantity: 1 },
+              inputs: { spareParts: 4 },
+              buildTicks: 120,
+              repeatable: true,
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toBe("https://planet.turingguild.com/catalog/blueprints");
+  expect(requests[0].init.method).toBe("GET");
+  expect(requests[0].init.headers).toEqual({
+    Authorization: "Bearer test-token",
+  });
+  expect(result.catalogVersion).toBe("2026-06-24");
+  expect(result.blueprints[0].blueprintId).toBe("survey-rover");
+  expect(await readFile(getRegistrationFilePath(tempDir), "utf8")).toBe(beforeRegistration);
+});
+
+test("listResourceCatalog fetches official resource types without changing local state", async () => {
+  await writePowerRegistration();
+  const beforeRegistration = await readFile(getRegistrationFilePath(tempDir), "utf8");
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+
+  const result = await listResourceCatalog({
+    cwd: tempDir,
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init: init ?? {} });
+
+      return new Response(
+        JSON.stringify({
+          catalogVersion: "2026-06-24",
+          resources: [
+            {
+              id: "resource-water",
+              resourceType: "water",
+              displayName: "Water",
+              kind: "consumable",
+              rarity: "common",
+              description: "Reusable life-support water.",
+              unit: "liters",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toBe("https://planet.turingguild.com/catalog/resources");
+  expect(requests[0].init.method).toBe("GET");
+  expect(requests[0].init.headers).toEqual({
+    Authorization: "Bearer test-token",
+  });
+  expect(result.catalogVersion).toBe("2026-06-24");
+  expect(result.resources[0].resourceType).toBe("water");
+  expect(await readFile(getRegistrationFilePath(tempDir), "utf8")).toBe(beforeRegistration);
+});
+
+test("showBlueprint fetches one official blueprint and converts missing blueprints to a friendly error", async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+
+  const blueprint = await showBlueprint("rover-bay-upgrade", {
+    cwd: tempDir,
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init: init ?? {} });
+
+      return new Response(
+        JSON.stringify({
+          blueprint: {
+            id: "bp-2",
+            blueprintId: "rover-bay-upgrade",
+            displayName: "Rover Bay Upgrade",
+            description: "Upgrades the rover bay.",
+            status: "published",
+            output: { itemType: "facility-upgrade", quantity: 1 },
+            inputs: { spareParts: 8, power: 3 },
+            productionCost: { powerKwh: 12 },
+            requiredFacility: { moduleType: "rover-bay", level: 1 },
+            buildTicks: 300,
+            prerequisites: ["rover-bay"],
+            unlocks: ["survey-rover"],
+            repeatable: false,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  expect(requests[0].url).toBe("https://planet.turingguild.com/catalog/blueprints/rover-bay-upgrade");
+  expect(blueprint.displayName).toBe("Rover Bay Upgrade");
+  expect(blueprint.inputs).toEqual({ spareParts: 8, power: 3 });
+
+  await expect(
+    showBlueprint("missing-blueprint", {
+      cwd: tempDir,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({ error: { message: "not found" } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        ),
+    }),
+  ).rejects.toThrow("Blueprint not found: missing-blueprint");
 });
 
 test("tickHabitat advances one-second ticks and drains battery power", async () => {
