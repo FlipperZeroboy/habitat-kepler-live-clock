@@ -1,7 +1,13 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  getLocalStateStore,
+  getModulesFilePath,
+  getRegistrationFilePath,
+} from "./local-state";
+export { getModulesFilePath, getRegistrationFilePath } from "./local-state";
 
 type FetchLike = typeof fetch;
 
@@ -258,22 +264,6 @@ type KeplerConfig = {
 
 const defaultProjectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-export function getHabitatDirectory(cwd = process.cwd()) {
-  return join(cwd, ".habitat");
-}
-
-export function getRegistrationFilePath(cwd = process.cwd()) {
-  return join(getHabitatDirectory(cwd), "registration.json");
-}
-
-export function getModulesFilePath(cwd = process.cwd()) {
-  return join(getHabitatDirectory(cwd), "habitat-modules.json");
-}
-
-async function ensureHabitatDirectory(cwd: string) {
-  await mkdir(getHabitatDirectory(cwd), { recursive: true });
-}
-
 async function readEnvFile(path: string) {
   try {
     return parseEnv(await readFile(path, "utf8"));
@@ -371,66 +361,11 @@ export async function checkLocalConfig(options: RuntimeOptions = {}): Promise<Co
 }
 
 export async function loadLocalRegistration(cwd = process.cwd()) {
-  try {
-    const contents = await readFile(getRegistrationFilePath(cwd), "utf8");
-    const registration = normalizeRegistration(JSON.parse(contents) as Partial<LocalRegistration>);
-    const modules = await loadHabitatModules(cwd);
-
-    if (modules) {
-      registration.modules = modules;
-    }
-
-    return registration;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-
-    throw error;
-  }
+  return getLocalStateStore(cwd).load();
 }
 
 function cloneJson<T>(value: T): T {
   return structuredClone(value);
-}
-
-async function loadHabitatModules(cwd: string) {
-  try {
-    const contents = await readFile(getModulesFilePath(cwd), "utf8");
-    const modules = JSON.parse(contents);
-    return Array.isArray(modules) ? modules as HabitatModule[] : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-
-    throw error;
-  }
-}
-
-function normalizeRegistration(registration: Partial<LocalRegistration>): LocalRegistration {
-  return {
-    habitatUuid: registration.habitatUuid ?? "",
-    habitatId: registration.habitatId ?? "",
-    displayName: registration.displayName ?? "",
-    registeredAt: registration.registeredAt ?? "",
-    currentTick: typeof registration.currentTick === "number" ? registration.currentTick : 0,
-    starterModules: Array.isArray(registration.starterModules) ? registration.starterModules : [],
-    blueprints: Array.isArray(registration.blueprints) ? registration.blueprints : [],
-    modules: Array.isArray(registration.modules) ? registration.modules : [],
-    powerSummary: normalizePowerSummary(registration.powerSummary),
-    tickHistory: Array.isArray(registration.tickHistory) ? registration.tickHistory : [],
-  };
-}
-
-function normalizePowerSummary(summary?: Partial<PowerSummary>): PowerSummary {
-  return {
-    totalPowerDrawKw: typeof summary?.totalPowerDrawKw === "number" ? summary.totalPowerDrawKw : 0,
-    energyUsedKwh: typeof summary?.energyUsedKwh === "number" ? summary.energyUsedKwh : 0,
-    batteryEnergyKwh: typeof summary?.batteryEnergyKwh === "number" ? summary.batteryEnergyKwh : 0,
-    batteryCapacityKwh: typeof summary?.batteryCapacityKwh === "number" ? summary.batteryCapacityKwh : 0,
-    powerShortageKwh: typeof summary?.powerShortageKwh === "number" ? summary.powerShortageKwh : 0,
-  };
 }
 
 function hydrateStarterModules(
@@ -458,27 +393,11 @@ function hydrateStarterModules(
 }
 
 async function saveLocalRegistration(cwd: string, registration: LocalRegistration) {
-  await ensureHabitatDirectory(cwd);
-  await writeFile(
-    getRegistrationFilePath(cwd),
-    JSON.stringify(registration, null, 2) + "\n",
-    "utf8",
-  );
-  await saveHabitatModules(cwd, registration.modules);
-}
-
-async function saveHabitatModules(cwd: string, modules: HabitatModule[]) {
-  await ensureHabitatDirectory(cwd);
-  await writeFile(
-    getModulesFilePath(cwd),
-    JSON.stringify(modules, null, 2) + "\n",
-    "utf8",
-  );
+  await getLocalStateStore(cwd).save(registration);
 }
 
 async function deleteLocalRegistration(cwd: string) {
-  await rm(getRegistrationFilePath(cwd), { force: true });
-  await rm(getModulesFilePath(cwd), { force: true });
+  await getLocalStateStore(cwd).delete();
 }
 
 async function parseJsonResponse(response: Response) {
@@ -545,7 +464,13 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
     starterModules,
     blueprints: Array.isArray(body.blueprints) ? body.blueprints : [],
     modules: hydrateStarterModules(body.habitatId, starterModules, registeredAt),
-    powerSummary: normalizePowerSummary(),
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
     tickHistory: [],
   };
 

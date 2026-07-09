@@ -20,6 +20,7 @@ import {
   listConstructionJobs,
   listModules,
   loadLocalRegistration,
+  LocalRegistration,
   registerHabitat,
   setModuleStatus,
   showBlueprint,
@@ -29,6 +30,11 @@ import {
   unregisterHabitat,
   updateModule,
 } from "../src/habitat";
+import {
+  getLocalStateStore,
+  getModulesFilePath as getLocalModulesFilePath,
+  getRegistrationFilePath as getLocalRegistrationFilePath,
+} from "../src/local-state";
 
 let tempDir: string;
 
@@ -43,6 +49,87 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
+});
+
+test("local state repository saves, loads, overrides modules, and deletes both files", async () => {
+  const store = getLocalStateStore(tempDir);
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
+    starterModules: [],
+    blueprints: [],
+    modules: [
+      {
+        id: "module-1",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "command-module",
+        moduleType: "command-module",
+        displayName: "Command Module",
+        connectedTo: [],
+        runtimeAttributes: { health: 100, status: "active" },
+        capabilities: ["habitat-command"],
+        source: "kepler-registration",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+    ],
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
+    tickHistory: [],
+  } satisfies LocalRegistration;
+
+  await store.save(registration);
+  await writeFile(
+    getLocalModulesFilePath(tempDir),
+    JSON.stringify([
+      {
+        id: "module-2",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "life-support",
+        moduleType: "life-support",
+        displayName: "Life Support",
+        connectedTo: [],
+        runtimeAttributes: { health: 100, status: "idle" },
+        capabilities: ["atmosphere-control"],
+        source: "local-blueprint",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+    ], null, 2) + "\n",
+    "utf8",
+  );
+
+  expect(await store.load()).toEqual({
+    ...registration,
+    modules: [
+      {
+        id: "module-2",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "life-support",
+        moduleType: "life-support",
+        displayName: "Life Support",
+        connectedTo: [],
+        runtimeAttributes: { health: 100, status: "idle" },
+        capabilities: ["atmosphere-control"],
+        source: "local-blueprint",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+    ],
+  });
+
+  await store.delete();
+  expect(await store.load()).toBeNull();
+  await expect(Bun.file(getLocalRegistrationFilePath(tempDir)).exists()).resolves.toBe(false);
+  await expect(Bun.file(getLocalModulesFilePath(tempDir)).exists()).resolves.toBe(false);
 });
 
 async function writePowerRegistration({
