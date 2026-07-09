@@ -20,6 +20,7 @@ test("help advertises Kepler registration, catalog, and local module commands", 
   expect(output).toContain("status");
   expect(output).toContain("unregister");
   expect(output).toContain("config");
+  expect(output).toContain("solar");
   expect(output).toContain("blueprint");
   expect(output).toContain("resource");
   expect(output).toContain("module");
@@ -277,6 +278,28 @@ function startBlueprintCatalogServer() {
   });
 
   return `http://${server.hostname}:${server.port}`;
+}
+
+function startSolarStatusServer() {
+  server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+
+      if (url.pathname === "/world/solar-irradiance") {
+        return Response.json({
+          solarIrradiance: {
+            wPerM2: 900,
+            condition: "clear",
+          },
+        });
+      }
+
+      return Response.json({ error: { message: "not found" } }, { status: 404 });
+    },
+  });
+
+  return `http://127.0.0.1:${server.port}`;
 }
 
 test("blueprint list and show read the Kepler catalog without changing local state", async () => {
@@ -1194,12 +1217,38 @@ test("tick command prints power summary and persists battery drain", async () =>
   expect(tickOutput).toContain("Energy Used: 0.11667 kWh");
   expect(tickOutput).toContain("Battery Energy: 499.88333 / 500 kWh");
   expect(tickOutput).toContain("Power Shortage: 0 kWh");
+  expect(tickOutput).toContain("Solar Generated: 0 kWh");
+  expect(tickOutput).toContain("Solar Charging: none (no online solar modules)");
 
   const stored = JSON.parse(
     await readFile(join(tempDir, ".habitat", "registration.json"), "utf8"),
   );
   expect(stored.currentTick).toBe(60);
   expect(stored.modules[0].runtimeAttributes.currentEnergyKwh).toBeCloseTo(499.8833333333, 10);
+});
+
+test("solar status prints the current Kepler irradiance in beginner-friendly language", async () => {
+  const baseUrl = startSolarStatusServer();
+  await writeFile(
+    join(tempDir, ".env"),
+    `KEPLER_BASE_URL=${baseUrl}\nKEPLER_PLANET_TOKEN=test-token\n`,
+    "utf8",
+  );
+
+  const solarProc = Bun.spawn(["bun", "run", "src/index.ts", "solar", "status"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const output = await new Response(solarProc.stdout).text();
+  const errorOutput = await new Response(solarProc.stderr).text();
+  expect(await solarProc.exited).toBe(0);
+  expect(errorOutput).toBe("");
+  expect(output).toContain("Solar Irradiance: 900 W/m2");
+  expect(output).toContain("Condition: clear");
+  expect(output).toContain("Kepler reports clear conditions. Local solar charging will use this irradiance.");
 });
 
 test("tick command reports completed construction jobs", async () => {

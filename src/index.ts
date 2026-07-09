@@ -16,6 +16,7 @@ import { createConstructionCommand } from "./commands/construction";
 import { createInventoryCommand } from "./commands/inventory";
 import { createModuleCommand } from "./commands/module";
 import { createResourceCommand } from "./commands/resource";
+import { createSolarCommand } from "./commands/solar";
 import { formatNumber, parseTickCount, printError } from "./cli-utils";
 
 const program = new Command();
@@ -38,6 +39,7 @@ Examples:
   habitat status
   habitat unregister
   habitat config
+  habitat solar status
   habitat tick 60
   habitat blueprint list
   habitat construct small-solar-array --dry-run
@@ -119,6 +121,12 @@ program
         `Battery Energy: ${formatNumber(result.batteryEnergyKwh)} / ${formatNumber(result.batteryCapacityKwh)} kWh`,
       );
       console.log(`Power Shortage: ${formatNumber(result.powerShortageKwh)} kWh`);
+      console.log(`Solar Generated: ${formatNumber(result.solarGeneratedKwh)} kWh`);
+      if (result.solarChargedKwh > 0) {
+        console.log(`Solar Charged: ${formatNumber(result.solarChargedKwh)} kWh`);
+      } else {
+        console.log(`Solar Charging: none (${result.solarChargingReason})`);
+      }
 
       if (result.batteryCapacityKwh > 0 && result.batteryEnergyKwh <= 0) {
         console.log("No usable battery energy remains.");
@@ -155,6 +163,7 @@ program.addCommand(createConstructCommand());
 program.addCommand(createConstructionCommand());
 program.addCommand(createInventoryCommand());
 program.addCommand(createResourceCommand());
+program.addCommand(createSolarCommand());
 program.addCommand(createModuleCommand());
 
 program

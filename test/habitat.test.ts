@@ -15,6 +15,7 @@ import {
   getModulesFilePath,
   getRegistrationFilePath,
   getRegistrationStatus,
+  getSolarIrradiance,
   listInventory,
   listConstructionJobs,
   listModules,
@@ -123,6 +124,103 @@ async function writePowerRegistration({
       2,
     ) + "\n",
     "utf8",
+  );
+}
+
+async function writeSolarRegistration({
+  batteryStatus = "online",
+  currentEnergyKwh = 10,
+  energyStorageKwh = 10.01,
+  includeBattery = true,
+  solarStatus = "online",
+  includeSolar = true,
+}: {
+  batteryStatus?: string;
+  currentEnergyKwh?: number;
+  energyStorageKwh?: number;
+  includeBattery?: boolean;
+  solarStatus?: string;
+  includeSolar?: boolean;
+} = {}) {
+  const modules = [];
+
+  if (includeBattery) {
+    modules.push({
+      id: "battery-1",
+      habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+      blueprintId: "basic-battery",
+      moduleType: "basic-battery",
+      displayName: "Basic Battery",
+      connectedTo: [],
+      runtimeAttributes: {
+        health: 100,
+        status: batteryStatus,
+        currentEnergyKwh,
+        energyStorageKwh,
+        powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+      },
+      capabilities: ["power-storage"],
+      source: "kepler-registration",
+      createdAt: "2026-07-06T12:00:00.000Z",
+      updatedAt: "2026-07-06T12:00:00.000Z",
+    });
+  }
+
+  if (includeSolar) {
+    modules.push({
+      id: "solar-1",
+      habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+      blueprintId: "small-solar-array",
+      moduleType: "small-solar-array",
+      displayName: "Small Solar Array",
+      connectedTo: [],
+      runtimeAttributes: {
+        health: 100,
+        status: solarStatus,
+        powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+        powerGenerationKw: 12,
+      },
+      capabilities: ["solar-generation"],
+      source: "local-blueprint",
+      createdAt: "2026-07-06T12:00:00.000Z",
+      updatedAt: "2026-07-06T12:00:00.000Z",
+    });
+  }
+
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify({
+      habitatUuid: "11111111-1111-4111-8111-111111111111",
+      habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+      displayName: "Artemis Ridge",
+      registeredAt: "2026-07-06T12:00:00.000Z",
+      currentTick: 0,
+      starterModules: [],
+      blueprints: [],
+      modules,
+      powerSummary: {
+        totalPowerDrawKw: 0,
+        energyUsedKwh: 0,
+        batteryEnergyKwh: 0,
+        batteryCapacityKwh: 0,
+        powerShortageKwh: 0,
+      },
+      tickHistory: [],
+    }, null, 2) + "\n",
+    "utf8",
+  );
+}
+
+function solarResponse(wPerM2?: number) {
+  return async () => new Response(
+    JSON.stringify({
+      solarIrradiance: {
+        ...(wPerM2 === undefined ? {} : { wPerM2 }),
+        condition: wPerM2 === undefined ? "unknown" : "clear",
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
   );
 }
 
@@ -867,6 +965,292 @@ test("tickHabitat clamps battery energy and reports shortage", async () => {
   expect((await loadLocalRegistration(tempDir))?.modules[0].runtimeAttributes.currentEnergyKwh).toBe(0);
 });
 
+test("tickHabitat charges an online battery from online solar modules using Kepler irradiance", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 0,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "battery-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "basic-battery",
+            moduleType: "basic-battery",
+            displayName: "Basic Battery",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "online",
+              currentEnergyKwh: 10,
+              energyStorageKwh: 10.01,
+              powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+            },
+            capabilities: ["power-storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "command-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "command-module",
+            moduleType: "command-module",
+            displayName: "Command Module",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { active: 2 },
+            },
+            capabilities: ["habitat-command"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "life-support-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "life-support",
+            moduleType: "life-support",
+            displayName: "Life Support",
+            connectedTo: ["command-1"],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { active: 5 },
+            },
+            capabilities: ["atmosphere-control"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "solar-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "small-solar-array",
+            moduleType: "small-solar-array",
+            displayName: "Small Solar Array",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "online",
+              powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+              powerGenerationKw: 12,
+            },
+            capabilities: ["solar-generation"],
+            source: "local-blueprint",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const result = await tickHabitat(1, {
+    cwd: tempDir,
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          solarIrradiance: {
+            wPerM2: 900,
+            condition: "clear",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+  });
+
+  expect(result.energyUsedKwh).toBe(7 / 3600);
+  expect(result.solarGeneratedKwh).toBe(6 / 3600);
+  expect(result.solarChargedKwh).toBe(6 / 3600);
+  expect(result.solarChargingReason).toBe("Solar charging completed.");
+  expect(result.batteryEnergyKwh).toBeCloseTo(10 - 1 / 3600, 10);
+  expect((await loadLocalRegistration(tempDir))?.modules[0].runtimeAttributes.currentEnergyKwh).toBeCloseTo(10 - 1 / 3600, 10);
+});
+
+test("tickHabitat does not apply solar charging when the battery is offline", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 0,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "battery-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "basic-battery",
+            moduleType: "basic-battery",
+            displayName: "Basic Battery",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "offline",
+              currentEnergyKwh: 10,
+              energyStorageKwh: 10.01,
+              powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+            },
+            capabilities: ["power-storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "command-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "command-module",
+            moduleType: "command-module",
+            displayName: "Command Module",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { active: 2 },
+            },
+            capabilities: ["habitat-command"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "life-support-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "life-support",
+            moduleType: "life-support",
+            displayName: "Life Support",
+            connectedTo: ["command-1"],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { active: 5 },
+            },
+            capabilities: ["atmosphere-control"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "solar-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "small-solar-array",
+            moduleType: "small-solar-array",
+            displayName: "Small Solar Array",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "online",
+              powerDrawKw: { offline: 0, online: 0, active: 0, damaged: 0 },
+              powerGenerationKw: 12,
+            },
+            capabilities: ["solar-generation"],
+            source: "local-blueprint",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const result = await tickHabitat(1, {
+    cwd: tempDir,
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          solarIrradiance: {
+            wPerM2: 900,
+            condition: "clear",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+  });
+
+  expect(result.batteryEnergyKwh).toBeCloseTo(10 - 7 / 3600, 10);
+  expect(result.solarGeneratedKwh).toBe(0);
+  expect(result.solarChargingReason).toBe("no online battery modules");
+});
+
+test.each([
+  ["no solar panel exists", { includeSolar: false }, "no online solar modules"],
+  ["solar panel is offline", { solarStatus: "offline" }, "no online solar modules"],
+  ["no battery exists", { includeBattery: false }, "no online battery modules"],
+] as const)("tickHabitat reports when %s", async (_case, setup, reason) => {
+  await writeSolarRegistration(setup);
+
+  const result = await tickHabitat(1, {
+    cwd: tempDir,
+    fetchImpl: solarResponse(900),
+  });
+
+  expect(result.solarGeneratedKwh).toBe(0);
+  expect(result.solarChargedKwh).toBe(0);
+  expect(result.solarChargingReason).toBe(reason);
+});
+
+test.each([
+  ["zero irradiance", solarResponse(0)],
+  ["missing irradiance", solarResponse(undefined)],
+] as const)("tickHabitat reports %s without charging", async (_case, fetchImpl) => {
+  await writeSolarRegistration();
+
+  const result = await tickHabitat(1, { cwd: tempDir, fetchImpl });
+
+  expect(result.solarGeneratedKwh).toBe(0);
+  expect(result.solarChargedKwh).toBe(0);
+  expect(result.solarChargingReason).toBe("no usable solar irradiance was reported by Kepler");
+});
+
+test("tickHabitat reports when an online battery is already full", async () => {
+  await writeSolarRegistration({ currentEnergyKwh: 10.01, energyStorageKwh: 10.01 });
+
+  const result = await tickHabitat(1, {
+    cwd: tempDir,
+    fetchImpl: solarResponse(900),
+  });
+
+  expect(result.solarGeneratedKwh).toBe(6 / 3600);
+  expect(result.solarChargedKwh).toBe(0);
+  expect(result.solarChargingReason).toBe("all online batteries were full");
+  expect(result.batteryEnergyKwh).toBe(10.01);
+});
+
+test("tickHabitat reports when Kepler solar irradiance fails", async () => {
+  await writeSolarRegistration();
+
+  const result = await tickHabitat(1, {
+    cwd: tempDir,
+    fetchImpl: async () => {
+      throw new Error("Kepler unavailable");
+    },
+  });
+
+  expect(result.solarGeneratedKwh).toBe(0);
+  expect(result.solarChargedKwh).toBe(0);
+  expect(result.solarChargingReason).toBe("solar irradiance could not be read from Kepler");
+});
+
 test("tickHabitat advances construction jobs and completes output modules only after enough ticks", async () => {
   await mkdir(join(tempDir, ".habitat"), { recursive: true });
   await writeFile(
@@ -1272,6 +1656,37 @@ test("getRegistrationStatus fetches the saved habitat registration from Kepler",
   });
   expect(status.habitat.status).toBe("active");
   expect(status.habitat.habitatSlug).toBe("artemis-ridge");
+});
+
+test("getSolarIrradiance fetches and parses the current Kepler solar irradiance", async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const solar = await getSolarIrradiance({
+    cwd: tempDir,
+    fetchImpl: async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init: init ?? {} });
+
+      return new Response(
+        JSON.stringify({
+          solarIrradiance: {
+            wPerM2: 900,
+            condition: "clear",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0].url).toBe("https://planet.turingguild.com/world/solar-irradiance");
+  expect(requests[0].init.method).toBe("GET");
+  expect(requests[0].init.headers).toEqual({});
+  expect(solar).toEqual({
+    solarIrradiance: {
+      wPerM2: 900,
+      condition: "clear",
+    },
+  });
 });
 
 test("unregisterHabitat deletes server registration before removing the local registration file", async () => {

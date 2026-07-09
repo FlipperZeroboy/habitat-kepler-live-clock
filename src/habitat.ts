@@ -89,6 +89,9 @@ export type TickSummary = PowerSummary & {
   startTick: number;
   currentTick: number;
   ticksAdvanced: number;
+  solarGeneratedKwh: number;
+  solarChargedKwh: number;
+  solarChargingReason: string;
   completedConstructionJobs: ConstructionCompletion[];
 };
 
@@ -196,6 +199,13 @@ export type HabitatStatus = {
     catalogVersion: string;
     status: string;
     lastSeenAt?: string | null;
+  };
+};
+
+export type SolarIrradianceStatus = {
+  solarIrradiance: {
+    wPerM2: number;
+    condition: string;
   };
 };
 
@@ -671,8 +681,91 @@ function batteryModules(modules: HabitatModule[]) {
   );
 }
 
+function onlineBatteryModules(modules: HabitatModule[]) {
+  return batteryModules(modules).filter((module) => isOnlineStatus(module.runtimeAttributes.status));
+}
+
 function isOnlineStatus(status: unknown) {
   return status !== "offline" && status !== "damaged";
+}
+
+function solarGenerationModules(modules: HabitatModule[]) {
+  return modules.filter(
+    (module) =>
+      isOnlineStatus(module.runtimeAttributes.status) &&
+      numericAttribute(module.runtimeAttributes.powerGenerationKw) > 0 &&
+      (module.capabilities.includes("solar-generation") || module.moduleType.includes("solar")),
+  );
+}
+
+function chargeBatteryModules(modules: HabitatModule[], generatedKwh: number) {
+  let energyRemainingToStore = generatedKwh;
+
+  for (const module of onlineBatteryModules(modules)) {
+    const currentEnergyKwh = numericAttribute(module.runtimeAttributes.currentEnergyKwh);
+    const energyStorageKwh = numericAttribute(module.runtimeAttributes.energyStorageKwh);
+    const availableCapacityKwh = Math.max(0, energyStorageKwh - currentEnergyKwh);
+    const storedKwh = Math.min(availableCapacityKwh, energyRemainingToStore);
+
+    if (storedKwh <= 0) {
+      continue;
+    }
+
+    module.runtimeAttributes.currentEnergyKwh = currentEnergyKwh + storedKwh;
+    energyRemainingToStore -= storedKwh;
+
+    if (energyRemainingToStore <= 0) {
+      break;
+    }
+  }
+
+  return generatedKwh - energyRemainingToStore;
+}
+
+type SolarChargingResult = {
+  generatedKwh: number;
+  chargedKwh: number;
+  reason: string;
+};
+
+async function generateSolarChargeKwh(
+  modules: HabitatModule[],
+  ticksAdvanced: number,
+  options: RuntimeOptions = {},
+): Promise<SolarChargingResult> {
+  const solarModules = solarGenerationModules(modules);
+  const chargeableBatteries = onlineBatteryModules(modules);
+
+  if (solarModules.length === 0) {
+    return { generatedKwh: 0, chargedKwh: 0, reason: "no online solar modules" };
+  }
+
+  if (chargeableBatteries.length === 0) {
+    return { generatedKwh: 0, chargedKwh: 0, reason: "no online battery modules" };
+  }
+
+  let solar: SolarIrradianceStatus;
+  try {
+    solar = await getSolarIrradiance(options);
+  } catch {
+    return { generatedKwh: 0, chargedKwh: 0, reason: "solar irradiance could not be read from Kepler" };
+  }
+
+  const irradiance = solar.solarIrradiance.wPerM2;
+
+  if (!Number.isFinite(irradiance) || irradiance <= 0) {
+    return { generatedKwh: 0, chargedKwh: 0, reason: "no usable solar irradiance was reported by Kepler" };
+  }
+
+  const totalSolarGenerationKw = solarModules.reduce(
+    (total, module) => total + numericAttribute(module.runtimeAttributes.powerGenerationKw),
+    0,
+  );
+  const solarMultiplier = irradiance / 900;
+  const solarEfficiency = 0.5;
+
+  const generatedKwh = (totalSolarGenerationKw * solarMultiplier * solarEfficiency * ticksAdvanced) / 3600;
+  return { generatedKwh, chargedKwh: 0, reason: "Solar charging completed." };
 }
 
 function isStorageModule(module: HabitatModule) {
@@ -950,6 +1043,14 @@ export async function tickHabitat(count: number, options: RuntimeOptions = {}) {
     energyRemainingToDrain -= drainedKwh;
   }
 
+  const solarCharging = await generateSolarChargeKwh(registration.modules, count, options);
+  solarCharging.chargedKwh = chargeBatteryModules(registration.modules, solarCharging.generatedKwh);
+  if (solarCharging.generatedKwh > 0 && solarCharging.chargedKwh === 0) {
+    solarCharging.reason = "all online batteries were full";
+  } else if (solarCharging.chargedKwh < solarCharging.generatedKwh) {
+    solarCharging.reason = "solar generation was capped by available battery capacity";
+  }
+
   const batteryEnergyKwh = batteryModules(registration.modules).reduce(
     (total, module) => total + numericAttribute(module.runtimeAttributes.currentEnergyKwh),
     0,
@@ -967,6 +1068,9 @@ export async function tickHabitat(count: number, options: RuntimeOptions = {}) {
     batteryEnergyKwh,
     batteryCapacityKwh,
     powerShortageKwh: energyRemainingToDrain,
+    solarGeneratedKwh: solarCharging.generatedKwh,
+    solarChargedKwh: solarCharging.chargedKwh,
+    solarChargingReason: solarCharging.reason,
     completedConstructionJobs: [],
   };
   result.completedConstructionJobs = advanceConstructionJobs(
@@ -1279,6 +1383,29 @@ export async function getRegistrationStatus(options: RuntimeOptions = {}) {
 
   await assertOk(response, "Status request");
   return (await parseJsonResponse(response)) as HabitatStatus;
+}
+
+export async function getSolarIrradiance(options: RuntimeOptions = {}) {
+  const cwd = await resolveProjectRoot(
+    options.cwd ?? process.cwd(),
+    options.projectRoot,
+  );
+  const config = await loadConfig(cwd);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const response = await fetchImpl(`${config.baseUrl}/world/solar-irradiance`, {
+    method: "GET",
+    headers: {},
+  });
+
+  await assertOk(response, "Solar irradiance request");
+  const body = await parseJsonResponse(response);
+
+  return {
+    solarIrradiance: {
+      wPerM2: numericAttribute(body?.solarIrradiance?.wPerM2),
+      condition: String(body?.solarIrradiance?.condition ?? "unknown"),
+    },
+  } satisfies SolarIrradianceStatus;
 }
 
 export async function unregisterHabitat(options: RuntimeOptions = {}) {
