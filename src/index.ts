@@ -11,6 +11,9 @@ import {
   unregisterHabitat,
 } from "./habitat";
 import { createBlueprintCommand } from "./commands/blueprint";
+import { createConstructCommand } from "./commands/construct";
+import { createConstructionCommand } from "./commands/construction";
+import { createInventoryCommand } from "./commands/inventory";
 import { createModuleCommand } from "./commands/module";
 import { createResourceCommand } from "./commands/resource";
 import { formatNumber, parseTickCount, printError } from "./cli-utils";
@@ -37,6 +40,10 @@ Examples:
   habitat config
   habitat tick 60
   habitat blueprint list
+  habitat construct small-solar-array --dry-run
+  habitat construction status
+  habitat inventory add ferrite 90
+  habitat inventory list
   habitat resource list
   habitat module list`,
   );
@@ -112,6 +119,19 @@ program
         `Battery Energy: ${formatNumber(result.batteryEnergyKwh)} / ${formatNumber(result.batteryCapacityKwh)} kWh`,
       );
       console.log(`Power Shortage: ${formatNumber(result.powerShortageKwh)} kWh`);
+
+      if (result.batteryCapacityKwh > 0 && result.batteryEnergyKwh <= 0) {
+        console.log("No usable battery energy remains.");
+      }
+
+      if (result.completedConstructionJobs.length > 0) {
+        console.log("Construction Completed:");
+
+        for (const job of result.completedConstructionJobs) {
+          console.log(`${job.blueprintId} -> ${job.outputModuleId}`);
+          console.log(`Facility Available: ${job.facilityName}`);
+        }
+      }
     } catch (error) {
       printError(error);
     }
@@ -131,6 +151,9 @@ program
   });
 
 program.addCommand(createBlueprintCommand());
+program.addCommand(createConstructCommand());
+program.addCommand(createConstructionCommand());
+program.addCommand(createInventoryCommand());
 program.addCommand(createResourceCommand());
 program.addCommand(createModuleCommand());
 

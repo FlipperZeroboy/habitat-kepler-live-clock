@@ -27,6 +27,10 @@ export function formatNumber(value: number) {
   return Number(value.toFixed(5)).toString();
 }
 
+export function formatTicksAsHours(ticks: number) {
+  return `${formatNumber(ticks)} ticks (${formatNumber(ticks / 3600)} hours)`;
+}
+
 export function formatJsonField(value: unknown) {
   if (value === undefined || value === null) {
     return "none";

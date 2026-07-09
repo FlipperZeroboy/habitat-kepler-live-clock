@@ -3,21 +3,27 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  addInventoryResource,
+  cancelConstructionJob,
   checkLocalConfig,
   createModule,
   deleteModule,
   listBlueprintCatalog,
   listResourceCatalog,
+  dryRunConstruction,
   getLocalStatusSummary,
   getModulesFilePath,
   getRegistrationFilePath,
   getRegistrationStatus,
+  listInventory,
+  listConstructionJobs,
   listModules,
   loadLocalRegistration,
   registerHabitat,
   setModuleStatus,
   showBlueprint,
   showModule,
+  startConstruction,
   tickHabitat,
   unregisterHabitat,
   updateModule,
@@ -353,6 +359,472 @@ test("showBlueprint fetches one official blueprint and converts missing blueprin
   ).rejects.toThrow("Blueprint not found: missing-blueprint");
 });
 
+test("dryRunConstruction checks readiness without changing local state", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 4,
+    starterModules: [],
+    blueprints: [],
+    modules: [
+      {
+        id: "battery-1",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "basic-battery",
+        moduleType: "basic-battery",
+        displayName: "Basic Battery",
+        connectedTo: [],
+        runtimeAttributes: {
+          health: 100,
+          status: "offline",
+          currentEnergyKwh: 10,
+          energyStorageKwh: 10,
+          powerDrawKw: { offline: 0 },
+        },
+        capabilities: ["power-storage"],
+        source: "kepler-registration",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+      {
+        id: "fabricator-1",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "workshop-fabricator",
+        moduleType: "workshop-fabricator",
+        displayName: "Workshop Fabricator",
+        connectedTo: [],
+        runtimeAttributes: { health: 100, status: "idle", powerDrawKw: { idle: 1 } },
+        capabilities: ["basic-fabrication"],
+        source: "kepler-registration",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+      {
+        id: "cache-1",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "supply-cache",
+        moduleType: "supply-cache",
+        displayName: "Supply Cache",
+        connectedTo: [],
+        runtimeAttributes: {
+          health: 100,
+          status: "active",
+          storedResources: { ferrite: 100, "silicate-glass": 40, "conductive-ore": 18 },
+          powerDrawKw: { active: 0.5 },
+        },
+        capabilities: ["storage"],
+        source: "kepler-registration",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+    ],
+  };
+  await writeFile(getRegistrationFilePath(tempDir), JSON.stringify(registration, null, 2) + "\n", "utf8");
+  const beforeRegistration = await readFile(getRegistrationFilePath(tempDir), "utf8");
+
+  const result = await dryRunConstruction("small-solar-array", {
+    cwd: tempDir,
+    fetchImpl: async (url, init) => {
+      expect(String(url)).toBe("https://planet.turingguild.com/catalog/blueprints/small-solar-array");
+      expect(init?.headers).toEqual({ Authorization: "Bearer test-token" });
+
+      return Response.json({
+        blueprint: {
+          blueprintId: "small-solar-array",
+          displayName: "Small Solar Array Blueprint",
+          status: "published",
+          output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+          inputs: { ferrite: 90, "silicate-glass": 45, "conductive-ore": 18 },
+          productionCost: { power: 3 },
+          requiredFacility: { moduleType: "workshop-fabricator", minimumLevel: 1 },
+          buildTicks: 180,
+          prerequisites: [],
+          runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+          capabilities: ["solar-generation"],
+        },
+      });
+    },
+  });
+
+  expect(result).toMatchObject({
+    blueprintId: "small-solar-array",
+    facilityExists: true,
+    facilityAvailable: true,
+    supplyCacheOnline: true,
+    prerequisitesMet: true,
+    inventorySufficient: false,
+    canStart: false,
+    moduleToCreate: {
+      itemType: "module",
+      moduleType: "small-solar-array",
+      quantity: 1,
+    },
+    resourcesToSpend: { ferrite: 90, "silicate-glass": 45, "conductive-ore": 18 },
+    inventoryChecks: [
+      { resource: "conductive-ore", required: 18, available: 18, sufficient: true },
+      { resource: "ferrite", required: 90, available: 100, sufficient: true },
+      { resource: "silicate-glass", required: 45, available: 40, sufficient: false },
+    ],
+  });
+  expect(await readFile(getRegistrationFilePath(tempDir), "utf8")).toBe(beforeRegistration);
+});
+
+test("startConstruction spends inventory and attaches a local construction job", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 4,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "battery-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "basic-battery",
+            moduleType: "basic-battery",
+            displayName: "Basic Battery",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "offline",
+              currentEnergyKwh: 10,
+              energyStorageKwh: 10,
+              powerDrawKw: { offline: 0 },
+            },
+            capabilities: ["power-storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "fabricator-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "workshop-fabricator",
+            moduleType: "workshop-fabricator",
+            displayName: "Workshop Fabricator",
+            connectedTo: [],
+            runtimeAttributes: { health: 100, status: "idle", powerDrawKw: { idle: 1, active: 8 } },
+            capabilities: ["basic-fabrication"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "cache-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "supply-cache",
+            moduleType: "supply-cache",
+            displayName: "Supply Cache",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              storedResources: { ferrite: 100, "silicate-glass": 50, "conductive-ore": 18 },
+              powerDrawKw: { active: 0.5 },
+            },
+            capabilities: ["storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const result = await startConstruction("small-solar-array", {
+    cwd: tempDir,
+    randomUuid: () => "33333333-3333-4333-8333-333333333333",
+    now: () => new Date("2026-07-06T12:30:00.000Z"),
+    fetchImpl: async () =>
+      Response.json({
+        blueprint: {
+          blueprintId: "small-solar-array",
+          displayName: "Small Solar Array Blueprint",
+          status: "published",
+          output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+          inputs: { ferrite: 90, "silicate-glass": 45, "conductive-ore": 18 },
+          productionCost: { power: 3 },
+          requiredFacility: { moduleType: "workshop-fabricator", minimumLevel: 1 },
+          buildTicks: 180,
+          prerequisites: [],
+          runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+          capabilities: ["solar-generation"],
+        },
+      }),
+  });
+  const job = result.job;
+
+  expect(job).toEqual({
+    id: "construction_33333333_3333_4333_8333_333333333333",
+    blueprintId: "small-solar-array",
+    outputModuleId: "module_33333333_3333_4333_8333_333333333333",
+    output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+    buildTicks: 180,
+    remainingTicks: 180,
+    runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+    capabilities: ["solar-generation"],
+    status: "active",
+    startedAt: "2026-07-06T12:30:00.000Z",
+  });
+
+  const stored = await loadLocalRegistration(tempDir);
+  expect(stored?.modules.map((module) => module.moduleType)).toEqual([
+    "basic-battery",
+    "workshop-fabricator",
+    "supply-cache",
+  ]);
+
+  const fabricator = stored?.modules.find((module) => module.id === "fabricator-1");
+  expect(result.facility.id).toBe("fabricator-1");
+  expect(fabricator?.runtimeAttributes.status).toBe("active");
+  expect(fabricator?.runtimeAttributes.constructionJob).toEqual(job);
+
+  const cache = stored?.modules.find((module) => module.id === "cache-1");
+  expect(cache?.runtimeAttributes.storedResources).toEqual({
+    ferrite: 10,
+    "silicate-glass": 5,
+    "conductive-ore": 0,
+  });
+});
+
+test("listConstructionJobs reports active jobs from local fabricators", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 4,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "fabricator-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "workshop-fabricator",
+            moduleType: "workshop-fabricator",
+            displayName: "Workshop Fabricator",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              constructionJob: {
+                id: "construction-1",
+                blueprintId: "small-solar-array",
+                outputModuleId: "module-solar-1",
+                output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+                buildTicks: 180,
+                remainingTicks: 172,
+                runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+                capabilities: ["solar-generation"],
+                status: "active",
+                startedAt: "2026-07-06T12:30:00.000Z",
+              },
+            },
+            capabilities: ["basic-fabrication"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:30:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  expect(await listConstructionJobs({ cwd: tempDir })).toEqual([
+    {
+      facilityId: "fabricator-1",
+      facilityName: "Workshop Fabricator",
+      job: {
+        id: "construction-1",
+        blueprintId: "small-solar-array",
+        outputModuleId: "module-solar-1",
+        output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+        buildTicks: 180,
+        remainingTicks: 172,
+        runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+        capabilities: ["solar-generation"],
+        status: "active",
+        startedAt: "2026-07-06T12:30:00.000Z",
+      },
+    },
+  ]);
+});
+
+test("cancelConstructionJob clears the job without refunding inventory or creating output", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 4,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "fabricator-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "workshop-fabricator",
+            moduleType: "workshop-fabricator",
+            displayName: "Workshop Fabricator",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              constructionJob: {
+                id: "construction-1",
+                blueprintId: "small-solar-array",
+                outputModuleId: "module-solar-1",
+                output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+                buildTicks: 180,
+                remainingTicks: 172,
+                runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+                capabilities: ["solar-generation"],
+                status: "active",
+                startedAt: "2026-07-06T12:30:00.000Z",
+              },
+            },
+            capabilities: ["basic-fabrication"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:30:00.000Z",
+          },
+          {
+            id: "cache-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "supply-cache",
+            moduleType: "supply-cache",
+            displayName: "Supply Cache",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              storedResources: { ferrite: 10, "silicate-glass": 5, "conductive-ore": 0 },
+            },
+            capabilities: ["storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:30:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const result = await cancelConstructionJob("fabricator-1", { cwd: tempDir });
+  expect(result).toEqual({
+    facilityId: "fabricator-1",
+    facilityName: "Workshop Fabricator",
+    jobId: "construction-1",
+    blueprintId: "small-solar-array",
+    outputModuleId: "module-solar-1",
+  });
+
+  const stored = await loadLocalRegistration(tempDir);
+  const fabricator = stored?.modules.find((module) => module.id === "fabricator-1");
+  const cache = stored?.modules.find((module) => module.id === "cache-1");
+
+  expect(fabricator?.runtimeAttributes.status).toBe("idle");
+  expect(fabricator?.runtimeAttributes.constructionJob).toBeUndefined();
+  expect(stored?.modules.find((module) => module.id === "module-solar-1")).toBeUndefined();
+  expect(cache?.runtimeAttributes.storedResources).toEqual({
+    ferrite: 10,
+    "silicate-glass": 5,
+    "conductive-ore": 0,
+  });
+});
+
+test("inventory add and list use the local supply cache", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 4,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "cache-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "supply-cache",
+            moduleType: "supply-cache",
+            displayName: "Supply Cache",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              storedResources: { ferrite: 10 },
+              powerDrawKw: { active: 0.5 },
+            },
+            capabilities: ["storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  expect(await addInventoryResource("ferrite", 90, { cwd: tempDir })).toEqual({
+    resource: "ferrite",
+    added: 90,
+    quantity: 100,
+    storageModuleId: "cache-1",
+    storageModuleName: "Supply Cache",
+  });
+  expect(await addInventoryResource("silicate-glass", 45, { cwd: tempDir })).toMatchObject({
+    resource: "silicate-glass",
+    quantity: 45,
+  });
+
+  expect(await listInventory({ cwd: tempDir })).toEqual([
+    { resource: "ferrite", quantity: 100 },
+    { resource: "silicate-glass", quantity: 45 },
+  ]);
+
+  const stored = await loadLocalRegistration(tempDir);
+  const cache = stored?.modules.find((module) => module.id === "cache-1");
+  expect(cache?.runtimeAttributes.storedResources).toEqual({
+    ferrite: 100,
+    "silicate-glass": 45,
+  });
+});
+
 test("tickHabitat advances one-second ticks and drains battery power", async () => {
   await writePowerRegistration();
 
@@ -393,6 +865,114 @@ test("tickHabitat clamps battery energy and reports shortage", async () => {
   expect(result.batteryEnergyKwh).toBe(0);
   expect(result.powerShortageKwh).toBeCloseTo(7 / 3600 - 0.001, 10);
   expect((await loadLocalRegistration(tempDir))?.modules[0].runtimeAttributes.currentEnergyKwh).toBe(0);
+});
+
+test("tickHabitat advances construction jobs and completes output modules only after enough ticks", async () => {
+  await mkdir(join(tempDir, ".habitat"), { recursive: true });
+  await writeFile(
+    getRegistrationFilePath(tempDir),
+    JSON.stringify(
+      {
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        displayName: "Artemis Ridge",
+        registeredAt: "2026-07-06T12:00:00.000Z",
+        currentTick: 0,
+        starterModules: [],
+        blueprints: [],
+        modules: [
+          {
+            id: "battery-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "basic-battery",
+            moduleType: "basic-battery",
+            displayName: "Basic Battery",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "offline",
+              currentEnergyKwh: 10,
+              energyStorageKwh: 10,
+              powerDrawKw: { offline: 0 },
+            },
+            capabilities: ["power-storage"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:00:00.000Z",
+          },
+          {
+            id: "fabricator-1",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            blueprintId: "workshop-fabricator",
+            moduleType: "workshop-fabricator",
+            displayName: "Workshop Fabricator",
+            connectedTo: [],
+            runtimeAttributes: {
+              health: 100,
+              status: "active",
+              powerDrawKw: { active: 8, idle: 1 },
+              constructionJob: {
+                id: "construction-1",
+                blueprintId: "small-solar-array",
+                outputModuleId: "module-solar-1",
+                output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+                buildTicks: 3,
+                remainingTicks: 3,
+                runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+                capabilities: ["solar-generation"],
+                status: "active",
+                startedAt: "2026-07-06T12:30:00.000Z",
+              },
+            },
+            capabilities: ["basic-fabrication"],
+            source: "kepler-registration",
+            createdAt: "2026-07-06T12:00:00.000Z",
+            updatedAt: "2026-07-06T12:30:00.000Z",
+          },
+        ],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  const partial = await tickHabitat(2, { cwd: tempDir });
+  expect(partial.completedConstructionJobs).toEqual([]);
+
+  let stored = await loadLocalRegistration(tempDir);
+  let fabricator = stored?.modules.find((module) => module.id === "fabricator-1");
+  expect(fabricator?.runtimeAttributes.status).toBe("active");
+  expect((fabricator?.runtimeAttributes.constructionJob as { remainingTicks: number }).remainingTicks).toBe(1);
+  expect(stored?.modules.find((module) => module.id === "module-solar-1")).toBeUndefined();
+
+  const completed = await tickHabitat(1, { cwd: tempDir });
+  expect(completed.completedConstructionJobs).toEqual([
+    {
+      jobId: "construction-1",
+      blueprintId: "small-solar-array",
+      outputModuleId: "module-solar-1",
+      outputModuleType: "small-solar-array",
+      facilityId: "fabricator-1",
+      facilityName: "Workshop Fabricator",
+    },
+  ]);
+
+  stored = await loadLocalRegistration(tempDir);
+  fabricator = stored?.modules.find((module) => module.id === "fabricator-1");
+  const outputModule = stored?.modules.find((module) => module.id === "module-solar-1");
+
+  expect(fabricator?.runtimeAttributes.status).toBe("idle");
+  expect(fabricator?.runtimeAttributes.constructionJob).toBeUndefined();
+  expect(outputModule).toMatchObject({
+    id: "module-solar-1",
+    blueprintId: "small-solar-array",
+    moduleType: "small-solar-array",
+    displayName: "Small Solar Array",
+    runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
+    capabilities: ["solar-generation"],
+    source: "local-blueprint",
+  });
 });
 
 test("module CRUD uses local modules and saved module blueprints", async () => {

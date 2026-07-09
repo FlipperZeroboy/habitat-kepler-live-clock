@@ -25,42 +25,143 @@ export function modulePowerDrawKw(module: HabitatModule) {
   return typeof draw === "number" && Number.isFinite(draw) ? draw : 0;
 }
 
+function numericAttribute(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function constructionJob(module: HabitatModule) {
+  const job = module.runtimeAttributes.constructionJob;
+
+  if (!job || typeof job !== "object" || Array.isArray(job)) {
+    return null;
+  }
+
+  const entry = job as Record<string, unknown>;
+
+  if (typeof entry.blueprintId !== "string") {
+    return null;
+  }
+
+  return entry;
+}
+
+function moduleEffectiveState(module: HabitatModule) {
+  const job = constructionJob(module);
+
+  if (job) {
+    return `constructing ${job.blueprintId}`;
+  }
+
+  if (
+    typeof module.runtimeAttributes.currentEnergyKwh === "number" &&
+    typeof module.runtimeAttributes.energyStorageKwh === "number" &&
+    numericAttribute(module.runtimeAttributes.energyStorageKwh) > 0 &&
+    numericAttribute(module.runtimeAttributes.currentEnergyKwh) <= 0
+  ) {
+    return "depleted";
+  }
+
+  return moduleStatus(module);
+}
+
 export function printModuleStatusTable(modules: HabitatModule[]) {
   const rows = modules.map((module) => ({
     name: module.displayName,
-    state: moduleStatus(module),
+    declaredState: moduleStatus(module),
+    effectiveState: moduleEffectiveState(module),
     powerDrawKw: modulePowerDrawKw(module),
   }));
   const nameWidth = Math.max("Module".length, ...rows.map((row) => row.name.length));
-  const stateWidth = Math.max("State".length, ...rows.map((row) => row.state.length));
+  const declaredWidth = Math.max("Declared".length, ...rows.map((row) => row.declaredState.length));
+  const effectiveWidth = Math.max("Effective".length, ...rows.map((row) => row.effectiveState.length));
   const totalPowerDrawKw = rows.reduce((total, row) => total + row.powerDrawKw, 0);
   const energyCostPerTickKwh = totalPowerDrawKw / 3600;
+  const batteryEnergyKwh = modules.reduce(
+    (total, module) => total + numericAttribute(module.runtimeAttributes.currentEnergyKwh),
+    0,
+  );
+  const batteryCapacityKwh = modules.reduce(
+    (total, module) => total + numericAttribute(module.runtimeAttributes.energyStorageKwh),
+    0,
+  );
 
-  console.log(`${"Module".padEnd(nameWidth)}  ${"State".padEnd(stateWidth)}  Power Draw`);
-  console.log(`${"-".repeat(nameWidth)}  ${"-".repeat(stateWidth)}  ----------`);
+  console.log(`${"Module".padEnd(nameWidth)}  ${"Declared".padEnd(declaredWidth)}  ${"Effective".padEnd(effectiveWidth)}  Power Draw`);
+  console.log(`${"-".repeat(nameWidth)}  ${"-".repeat(declaredWidth)}  ${"-".repeat(effectiveWidth)}  ----------`);
 
   for (const row of rows) {
     console.log(
-      `${row.name.padEnd(nameWidth)}  ${row.state.padEnd(stateWidth)}  ${formatNumber(row.powerDrawKw)} kW`,
+      `${row.name.padEnd(nameWidth)}  ${row.declaredState.padEnd(declaredWidth)}  ${row.effectiveState.padEnd(effectiveWidth)}  ${formatNumber(row.powerDrawKw)} kW`,
     );
   }
 
   console.log("");
   console.log(`Total Power Draw: ${formatNumber(totalPowerDrawKw)} kW`);
   console.log(`Energy Cost Per Tick: ${formatNumber(energyCostPerTickKwh)} kWh`);
+
+  if (batteryCapacityKwh > 0) {
+    console.log(`Battery Energy: ${formatNumber(batteryEnergyKwh)} / ${formatNumber(batteryCapacityKwh)} kWh`);
+
+    if (batteryEnergyKwh <= 0) {
+      console.log("No usable battery energy remains.");
+    }
+  }
 }
 
 export function printModule(module: HabitatModule) {
+  const job = constructionJob(module);
+
   console.log(`ID: ${module.id}`);
   console.log(`Habitat ID: ${module.habitatId}`);
   console.log(`Blueprint ID: ${module.blueprintId}`);
   console.log(`Module Type: ${module.moduleType}`);
   console.log(`Name: ${module.displayName}`);
   console.log(`Source: ${module.source}`);
-  console.log(`Status: ${moduleStatus(module)}`);
+  console.log(`Declared Status: ${moduleStatus(module)}`);
+  console.log(`Effective Status: ${moduleEffectiveState(module)}`);
   console.log(`Health: ${moduleHealth(module)}`);
   console.log(`Capabilities: ${module.capabilities.length > 0 ? module.capabilities.join(", ") : "none"}`);
   console.log(`Connected To: ${module.connectedTo.length > 0 ? module.connectedTo.join(", ") : "none"}`);
+
+  if (
+    numericAttribute(module.runtimeAttributes.energyStorageKwh) > 0 ||
+    typeof module.runtimeAttributes.currentEnergyKwh === "number"
+  ) {
+    console.log(
+      `Battery Energy: ${formatNumber(numericAttribute(module.runtimeAttributes.currentEnergyKwh))} / ${formatNumber(numericAttribute(module.runtimeAttributes.energyStorageKwh))} kWh`,
+    );
+  }
+
+  if (typeof module.runtimeAttributes.reserveKwh === "number") {
+    console.log(`Reserve Energy: ${formatNumber(module.runtimeAttributes.reserveKwh)} kWh`);
+  }
+
+  if (typeof module.runtimeAttributes.maxPowerOutputKw === "number") {
+    console.log(`Max Power Output: ${formatNumber(module.runtimeAttributes.maxPowerOutputKw)} kW`);
+  }
+
+  if (job) {
+    console.log(`Construction Job: ${job.id}`);
+    console.log(`Building: ${job.blueprintId}`);
+    console.log(`Output Module ID: ${job.outputModuleId ?? "unknown"}`);
+    console.log(`Remaining Build Time: ${formatNumber(numericAttribute(job.remainingTicks))} / ${formatNumber(numericAttribute(job.buildTicks))} ticks (${formatNumber(numericAttribute(job.remainingTicks) / 3600)} / ${formatNumber(numericAttribute(job.buildTicks) / 3600)} hours)`);
+  }
+
+  if (typeof module.runtimeAttributes.powerGenerationKw === "number") {
+    console.log(`Power Generation: ${formatNumber(module.runtimeAttributes.powerGenerationKw)} kW`);
+  }
+
+  if (typeof module.runtimeAttributes.degradedStormGenerationKw === "number") {
+    console.log(`Storm Generation: ${formatNumber(module.runtimeAttributes.degradedStormGenerationKw)} kW`);
+  }
+
+  if (typeof module.runtimeAttributes.surfaceAreaM2 === "number") {
+    console.log(`Surface Area: ${formatNumber(module.runtimeAttributes.surfaceAreaM2)} m2`);
+  }
+
+  if (typeof module.runtimeAttributes.maintenanceHoursPer100Ticks === "number") {
+    console.log(`Maintenance Load: ${formatNumber(module.runtimeAttributes.maintenanceHoursPer100Ticks)} crew-hours / 100 operating ticks`);
+  }
+
   console.log(`Runtime Attributes: ${JSON.stringify(module.runtimeAttributes)}`);
 }
 
@@ -136,6 +237,6 @@ export function printResourceTable(resources: IndustryResource[]) {
 
 export function printResourceCatalogNotes() {
   console.log("Resource catalog: possible resource types in the Kepler world.");
-  console.log("Local inventory: resources your habitat owns will be handled later.");
+  console.log("Local inventory: resources your habitat owns are managed with `habitat inventory`.");
   console.log("Blueprint requirements: resources or modules needed to build something later.");
 }
