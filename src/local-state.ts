@@ -1,5 +1,6 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import type { HabitatModule, LocalRegistration, PowerSummary } from "./habitat";
 
 export type LocalStateStore = {
@@ -8,26 +9,8 @@ export type LocalStateStore = {
   delete(): Promise<void>;
 };
 
-export type JsonLocalStateStore = LocalStateStore;
-
-function getLocalStateDirectory(cwd = process.cwd()) {
-  return join(cwd, ".habitat");
-}
-
-export function getRegistrationFilePath(cwd = process.cwd()) {
-  return join(getLocalStateDirectory(cwd), "registration.json");
-}
-
-export function getModulesFilePath(cwd = process.cwd()) {
-  return join(getLocalStateDirectory(cwd), "habitat-modules.json");
-}
-
-async function ensureLocalStateDirectory(cwd: string) {
-  await mkdir(getLocalStateDirectory(cwd), { recursive: true });
-}
-
-function cloneJson<T>(value: T): T {
-  return structuredClone(value);
+export function getDatabaseFilePath(cwd = process.cwd()) {
+  return join(cwd, ".habitat", "habitat.sqlite");
 }
 
 function normalizePowerSummary(summary?: Partial<PowerSummary>): PowerSummary {
@@ -40,92 +23,165 @@ function normalizePowerSummary(summary?: Partial<PowerSummary>): PowerSummary {
   };
 }
 
-function normalizeRegistration(registration: Partial<LocalRegistration>): LocalRegistration {
+function normalizeRegistration(registration: Partial<LocalRegistration>, modules: HabitatModule[]): LocalRegistration {
   return {
     habitatUuid: registration.habitatUuid ?? "",
     habitatId: registration.habitatId ?? "",
     displayName: registration.displayName ?? "",
     registeredAt: registration.registeredAt ?? "",
     currentTick: typeof registration.currentTick === "number" ? registration.currentTick : 0,
-    starterModules: Array.isArray(registration.starterModules) ? registration.starterModules : [],
-    blueprints: Array.isArray(registration.blueprints) ? registration.blueprints : [],
-    modules: Array.isArray(registration.modules) ? registration.modules : [],
+    starterModules: [],
+    blueprints: [],
+    modules,
     powerSummary: normalizePowerSummary(registration.powerSummary),
     tickHistory: Array.isArray(registration.tickHistory) ? registration.tickHistory : [],
   };
 }
 
-async function loadModules(cwd: string) {
-  try {
-    const contents = await readFile(getModulesFilePath(cwd), "utf8");
-    const modules = JSON.parse(contents);
-    return Array.isArray(modules) ? (modules as HabitatModule[]) : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
+function initializeDatabase(db: Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS habitat_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      habitat_uuid TEXT NOT NULL,
+      habitat_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      registered_at TEXT NOT NULL,
+      current_tick INTEGER NOT NULL,
+      power_summary_json TEXT NOT NULL,
+      tick_history_json TEXT NOT NULL
+    );
 
-    throw error;
+    CREATE TABLE IF NOT EXISTS modules (
+      id TEXT PRIMARY KEY,
+      habitat_id TEXT NOT NULL,
+      blueprint_id TEXT NOT NULL,
+      module_type TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      connected_to_json TEXT NOT NULL,
+      runtime_attributes_json TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      source TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+function openDatabase(path: string) {
+  const db = new Database(path);
+  initializeDatabase(db);
+  return db;
+}
+
+async function databaseExists(path: string) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-async function loadRegistration(cwd: string) {
-  try {
-    const contents = await readFile(getRegistrationFilePath(cwd), "utf8");
-    return normalizeRegistration(JSON.parse(contents) as Partial<LocalRegistration>);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
+function createSqliteLocalStateStore(cwd: string): LocalStateStore {
+  const databaseFile = getDatabaseFilePath(cwd);
 
-    throw error;
-  }
-}
-
-async function saveModules(cwd: string, modules: HabitatModule[]) {
-  await writeFile(getModulesFilePath(cwd), JSON.stringify(modules, null, 2) + "\n", "utf8");
-}
-
-async function saveRegistration(cwd: string, registration: LocalRegistration) {
-  await writeFile(
-    getRegistrationFilePath(cwd),
-    JSON.stringify(registration, null, 2) + "\n",
-    "utf8",
-  );
-}
-
-async function deleteRegistrationFiles(cwd: string) {
-  await rm(getRegistrationFilePath(cwd), { force: true });
-  await rm(getModulesFilePath(cwd), { force: true });
-}
-
-function createJsonLocalStateStore(cwd: string): JsonLocalStateStore {
   return {
     async load() {
-      const registration = await loadRegistration(cwd);
-
-      if (!registration) {
+      if (!(await databaseExists(databaseFile))) {
         return null;
       }
 
-      const modules = await loadModules(cwd);
-      if (modules) {
-        registration.modules = modules;
-      }
+      const db = openDatabase(databaseFile);
+      try {
+        const state = db.query("SELECT * FROM habitat_state WHERE id = 1").get<Record<string, unknown>>();
+        if (!state) {
+          return null;
+        }
 
-      return registration;
+        const modules = db.query("SELECT * FROM modules ORDER BY rowid").all<Record<string, string>>();
+        return normalizeRegistration(
+          {
+            habitatUuid: String(state.habitat_uuid),
+            habitatId: String(state.habitat_id),
+            displayName: String(state.display_name),
+            registeredAt: String(state.registered_at),
+            currentTick: Number(state.current_tick),
+            powerSummary: JSON.parse(String(state.power_summary_json)),
+            tickHistory: JSON.parse(String(state.tick_history_json)),
+          },
+          modules.map((module) => ({
+            id: module.id,
+            habitatId: module.habitat_id,
+            blueprintId: module.blueprint_id,
+            moduleType: module.module_type,
+            displayName: module.display_name,
+            connectedTo: JSON.parse(module.connected_to_json),
+            runtimeAttributes: JSON.parse(module.runtime_attributes_json),
+            capabilities: JSON.parse(module.capabilities_json),
+            source: module.source as HabitatModule["source"],
+            createdAt: module.created_at,
+            updatedAt: module.updated_at,
+          })),
+        );
+      } finally {
+        db.close();
+      }
     },
     async save(registration) {
-      await ensureLocalStateDirectory(cwd);
-      await saveRegistration(cwd, cloneJson(registration));
-      await saveModules(cwd, cloneJson(registration.modules));
+      await mkdir(join(cwd, ".habitat"), { recursive: true });
+      const db = openDatabase(databaseFile);
+      try {
+        const localRegistration = normalizeRegistration(registration, registration.modules);
+        const save = db.transaction(() => {
+          db.query("DELETE FROM habitat_state").run();
+          db.query("DELETE FROM modules").run();
+          db.query(`
+            INSERT INTO habitat_state
+              (id, habitat_uuid, habitat_id, display_name, registered_at, current_tick, power_summary_json, tick_history_json)
+            VALUES (1, $habitatUuid, $habitatId, $displayName, $registeredAt, $currentTick, $powerSummary, $tickHistory)
+          `).run({
+            $habitatUuid: localRegistration.habitatUuid,
+            $habitatId: localRegistration.habitatId,
+            $displayName: localRegistration.displayName,
+            $registeredAt: localRegistration.registeredAt,
+            $currentTick: localRegistration.currentTick,
+            $powerSummary: JSON.stringify(localRegistration.powerSummary),
+            $tickHistory: JSON.stringify(localRegistration.tickHistory),
+          });
+
+          const insertModule = db.query(`
+            INSERT INTO modules
+              (id, habitat_id, blueprint_id, module_type, display_name, connected_to_json, runtime_attributes_json, capabilities_json, source, created_at, updated_at)
+            VALUES ($id, $habitatId, $blueprintId, $moduleType, $displayName, $connectedTo, $runtimeAttributes, $capabilities, $source, $createdAt, $updatedAt)
+          `);
+
+          for (const module of localRegistration.modules) {
+            insertModule.run({
+              $id: module.id,
+              $habitatId: module.habitatId,
+              $blueprintId: module.blueprintId,
+              $moduleType: module.moduleType,
+              $displayName: module.displayName,
+              $connectedTo: JSON.stringify(module.connectedTo),
+              $runtimeAttributes: JSON.stringify(module.runtimeAttributes),
+              $capabilities: JSON.stringify(module.capabilities),
+              $source: module.source,
+              $createdAt: module.createdAt,
+              $updatedAt: module.updatedAt,
+            });
+          }
+        });
+        save();
+      } finally {
+        db.close();
+      }
     },
     async delete() {
-      await deleteRegistrationFiles(cwd);
+      await rm(databaseFile, { force: true });
     },
   };
 }
 
 export function getLocalStateStore(cwd = process.cwd()): LocalStateStore {
-  return createJsonLocalStateStore(cwd);
+  return createSqliteLocalStateStore(cwd);
 }

@@ -4,10 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getLocalStateStore,
-  getModulesFilePath,
-  getRegistrationFilePath,
+  getDatabaseFilePath,
 } from "./local-state";
-export { getModulesFilePath, getRegistrationFilePath } from "./local-state";
+export { getDatabaseFilePath } from "./local-state";
 
 type FetchLike = typeof fetch;
 
@@ -218,7 +217,7 @@ export type SolarIrradianceStatus = {
 export type ConfigCheck = {
   baseUrl: string;
   tokenLoaded: boolean;
-  registrationFile: string;
+  databaseFile: string;
 };
 
 type RuntimeOptions = {
@@ -356,7 +355,7 @@ export async function checkLocalConfig(options: RuntimeOptions = {}): Promise<Co
   return {
     baseUrl: config.baseUrl,
     tokenLoaded: config.token.length > 0,
-    registrationFile: getRegistrationFilePath(cwd),
+    databaseFile: getDatabaseFilePath(cwd),
   };
 }
 
@@ -1035,13 +1034,7 @@ export async function createModule(
   options: ModuleCreateOptions = {},
 ) {
   const { cwd, registration } = await loadRequiredRegistration(options);
-  const blueprint = registration.blueprints.find(
-    (entry) => entry.blueprintId === input.blueprintId,
-  );
-
-  if (!blueprint) {
-    throw new Error(`Blueprint not found: ${input.blueprintId}`);
-  }
+  const blueprint = await showBlueprint(input.blueprintId, options);
 
   if (blueprint.output?.itemType !== "module") {
     throw new Error(`Blueprint does not output a module: ${input.blueprintId}`);

@@ -1,7 +1,50 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile as fsReadFile, rm, writeFile as fsWriteFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getLocalStateStore } from "../src/local-state";
+
+function getRegistrationFilePath(cwd: string) {
+  return join(cwd, ".habitat", "registration.json");
+}
+
+function getModulesFilePath(cwd: string) {
+  return join(cwd, ".habitat", "habitat-modules.json");
+}
+
+async function writeFile(path: string, contents: string, encoding: BufferEncoding = "utf8") {
+  if (path === getRegistrationFilePath(dirname(dirname(path)))) {
+    await getLocalStateStore(dirname(dirname(path))).save(JSON.parse(contents));
+    return;
+  }
+
+  if (path === getModulesFilePath(dirname(dirname(path)))) {
+    const cwd = dirname(dirname(path));
+    const registration = await getLocalStateStore(cwd).load();
+    if (!registration) {
+      throw new Error("Test module fixture requires a registration fixture.");
+    }
+    registration.modules = JSON.parse(contents);
+    await getLocalStateStore(cwd).save(registration);
+    return;
+  }
+
+  await fsWriteFile(path, contents, encoding);
+}
+
+async function readFile(path: string, encoding: BufferEncoding = "utf8") {
+  if (path === getRegistrationFilePath(dirname(dirname(path)))) {
+    return JSON.stringify(await getLocalStateStore(dirname(dirname(path))).load());
+  }
+
+  if (path === getModulesFilePath(dirname(dirname(path)))) {
+    const registration = await getLocalStateStore(dirname(dirname(path))).load();
+    return JSON.stringify(registration?.modules ?? []);
+  }
+
+  return fsReadFile(path, encoding);
+}
 
 test("help advertises Kepler registration, catalog, and local module commands", async () => {
   const proc = Bun.spawn(["bun", "run", "src/index.ts", "--help"], {

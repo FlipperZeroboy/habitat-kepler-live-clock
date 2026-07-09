@@ -32,7 +32,7 @@ program
 
 Configuration:
   Reads KEPLER_BASE_URL and KEPLER_PLANET_TOKEN from .env.
-  Stores registration data in .habitat/registration.json.
+  Stores local Habitat state in .habitat/habitat.sqlite.
 
 Examples:
   habitat register --name "Artemis Ridge"
@@ -58,7 +58,7 @@ program
       const config = await checkLocalConfig();
       console.log(`Base URL: ${config.baseUrl}`);
       console.log(`Token Loaded: ${config.tokenLoaded ? "yes" : "no"}`);
-      console.log(`Registration File: ${config.registrationFile}`);
+      console.log(`Database File: ${config.databaseFile}`);
     } catch (error) {
       printError(error);
     }
@@ -73,7 +73,7 @@ program
       const registration = await registerHabitat(options.name);
       console.log(`Registered habitat: ${registration.displayName}`);
       console.log(`Habitat ID: ${registration.habitatId}`);
-      console.log("Local registration: .habitat/registration.json");
+      console.log("Local state database: .habitat/habitat.sqlite");
     } catch (error) {
       printError(error);
     }
@@ -147,12 +147,12 @@ program
 
 program
   .command("unregister")
-  .description("Unregister this habitat from Kepler and remove the local registration file.")
+  .description("Unregister this habitat from Kepler and remove the local SQLite state.")
   .action(async () => {
     try {
       const result = await unregisterHabitat();
       console.log(`Unregistered habitat: ${result.habitatId}`);
-      console.log("Removed local registration: .habitat/registration.json");
+      console.log("Removed local state database: .habitat/habitat.sqlite");
     } catch (error) {
       printError(error);
     }

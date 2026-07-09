@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile as fsReadFile, rm, writeFile as fsWriteFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   addInventoryResource,
   cancelConstructionJob,
@@ -12,8 +12,7 @@ import {
   listResourceCatalog,
   dryRunConstruction,
   getLocalStatusSummary,
-  getModulesFilePath,
-  getRegistrationFilePath,
+  getDatabaseFilePath,
   getRegistrationStatus,
   getSolarIrradiance,
   listInventory,
@@ -32,11 +31,50 @@ import {
 } from "../src/habitat";
 import {
   getLocalStateStore,
-  getModulesFilePath as getLocalModulesFilePath,
-  getRegistrationFilePath as getLocalRegistrationFilePath,
 } from "../src/local-state";
 
 let tempDir: string;
+
+function getRegistrationFilePath(cwd = tempDir) {
+  return join(cwd, ".habitat", "registration.json");
+}
+
+function getModulesFilePath(cwd = tempDir) {
+  return join(cwd, ".habitat", "habitat-modules.json");
+}
+
+async function writeFile(path: string, contents: string, encoding: BufferEncoding = "utf8") {
+  if (path === getRegistrationFilePath(dirname(dirname(path)))) {
+    await getLocalStateStore(dirname(dirname(path))).save(JSON.parse(contents));
+    return;
+  }
+
+  if (path === getModulesFilePath(dirname(dirname(path)))) {
+    const cwd = dirname(dirname(path));
+    const registration = await getLocalStateStore(cwd).load();
+    if (!registration) {
+      throw new Error("Test module fixture requires a registration fixture.");
+    }
+    registration.modules = JSON.parse(contents);
+    await getLocalStateStore(cwd).save(registration);
+    return;
+  }
+
+  await fsWriteFile(path, contents, encoding);
+}
+
+async function readFile(path: string, encoding: BufferEncoding = "utf8") {
+  if (path === getRegistrationFilePath(dirname(dirname(path)))) {
+    return JSON.stringify(await getLocalStateStore(dirname(dirname(path))).load());
+  }
+
+  if (path === getModulesFilePath(dirname(dirname(path)))) {
+    const registration = await getLocalStateStore(dirname(dirname(path))).load();
+    return JSON.stringify(registration?.modules ?? []);
+  }
+
+  return fsReadFile(path, encoding);
+}
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "habitat-cli-"));
@@ -51,7 +89,7 @@ afterEach(async () => {
   await rm(tempDir, { recursive: true, force: true });
 });
 
-test("local state repository saves, loads, overrides modules, and deletes both files", async () => {
+test("local state store saves and loads local state in sqlite, then deletes the database file", async () => {
   const store = getLocalStateStore(tempDir);
   const registration = {
     habitatUuid: "11111111-1111-4111-8111-111111111111",
@@ -87,49 +125,22 @@ test("local state repository saves, loads, overrides modules, and deletes both f
   } satisfies LocalRegistration;
 
   await store.save(registration);
-  await writeFile(
-    getLocalModulesFilePath(tempDir),
-    JSON.stringify([
-      {
-        id: "module-2",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        blueprintId: "life-support",
-        moduleType: "life-support",
-        displayName: "Life Support",
-        connectedTo: [],
-        runtimeAttributes: { health: 100, status: "idle" },
-        capabilities: ["atmosphere-control"],
-        source: "local-blueprint",
-        createdAt: "2026-07-06T12:00:00.000Z",
-        updatedAt: "2026-07-06T12:00:00.000Z",
-      },
-    ], null, 2) + "\n",
-    "utf8",
-  );
+  const databaseFile = join(tempDir, ".habitat", "habitat.sqlite");
 
-  expect(await store.load()).toEqual({
-    ...registration,
-    modules: [
-      {
-        id: "module-2",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        blueprintId: "life-support",
-        moduleType: "life-support",
-        displayName: "Life Support",
-        connectedTo: [],
-        runtimeAttributes: { health: 100, status: "idle" },
-        capabilities: ["atmosphere-control"],
-        source: "local-blueprint",
-        createdAt: "2026-07-06T12:00:00.000Z",
-        updatedAt: "2026-07-06T12:00:00.000Z",
-      },
-    ],
-  });
+  await expect(Bun.file(databaseFile).exists()).resolves.toBe(true);
+
+  const freshStore = getLocalStateStore(tempDir);
+  expect(await freshStore.load()).toEqual(registration);
 
   await store.delete();
-  expect(await store.load()).toBeNull();
-  await expect(Bun.file(getLocalRegistrationFilePath(tempDir)).exists()).resolves.toBe(false);
-  await expect(Bun.file(getLocalModulesFilePath(tempDir)).exists()).resolves.toBe(false);
+  expect(await freshStore.load()).toBeNull();
+  await expect(Bun.file(databaseFile).exists()).resolves.toBe(false);
+});
+
+test("local state store load returns null when the sqlite database is missing", async () => {
+  const store = getLocalStateStore(tempDir);
+
+  await expect(store.load()).resolves.toBeNull();
 });
 
 async function writePowerRegistration({
@@ -407,10 +418,11 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
   ]);
 
   const stored = await loadLocalRegistration(tempDir);
-  expect(stored).toEqual(registration);
-
-  const rawFile = await readFile(getRegistrationFilePath(tempDir), "utf8");
-  expect(JSON.parse(rawFile)).toEqual(registration);
+  expect(stored).toEqual({
+    ...registration,
+    starterModules: [],
+    blueprints: [],
+  });
 });
 
 test("listBlueprintCatalog fetches official blueprints without changing local state", async () => {
@@ -1446,57 +1458,90 @@ test("tickHabitat advances construction jobs and completes output modules only a
   });
 });
 
-test("module CRUD uses local modules and saved module blueprints", async () => {
-  await registerHabitat("Artemis Ridge", {
-    cwd: tempDir,
-    fetchImpl: async () =>
-      new Response(
-        JSON.stringify({
-          habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-          starterModules: [
-            {
-              id: "starter-command",
-              blueprintId: "command-module",
-              displayName: "Command Module",
-              connectedTo: [],
-              runtimeAttributes: { health: 100, status: "active" },
-              capabilities: ["habitat-command"],
-            },
-          ],
-          blueprints: [
-            {
-              blueprintId: "small-solar-array",
-              displayName: "Small Solar Array Blueprint",
-              output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
-              runtimeAttributes: {
-                health: 100,
-                status: "idle",
-                powerDrawKw: { offline: 0, idle: 0, active: 0, damaged: 0 },
-              },
-              capabilities: ["solar-generation"],
-            },
-            {
-              blueprintId: "survey-rover",
-              displayName: "Survey Rover Blueprint",
-              output: { itemType: "rover", quantity: 1 },
-              runtimeAttributes: { health: 100 },
-              capabilities: ["starter-survey"],
-            },
-          ],
-        }),
-        { status: 201, headers: { "content-type": "application/json" } },
-      ),
-    randomUuid: () => "11111111-1111-4111-8111-111111111111",
-    now: () => new Date("2026-07-06T12:00:00.000Z"),
+test("module CRUD uses local modules and fetches official blueprints from Kepler", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
+    starterModules: [],
+    blueprints: [],
+    modules: [
+      {
+        id: "starter-command",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        blueprintId: "command-module",
+        moduleType: "command-module",
+        displayName: "Command Module",
+        connectedTo: [],
+        runtimeAttributes: { health: 100, status: "active" },
+        capabilities: ["habitat-command"],
+        source: "kepler-registration",
+        createdAt: "2026-07-06T12:00:00.000Z",
+        updatedAt: "2026-07-06T12:00:00.000Z",
+      },
+    ],
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
+    tickHistory: [],
   });
 
   expect(await listModules({ cwd: tempDir })).toHaveLength(1);
   expect((await showModule("starter-command", { cwd: tempDir })).displayName).toBe("Command Module");
 
+  const blueprintRequests: string[] = [];
   const created = await createModule(
     { blueprintId: "small-solar-array", name: "Solar Test Array" },
     {
       cwd: tempDir,
+      fetchImpl: async (url: string | URL | Request) => {
+        blueprintRequests.push(String(url));
+
+        if (String(url) === "https://planet.turingguild.com/catalog/blueprints/small-solar-array") {
+          return new Response(
+            JSON.stringify({
+              blueprint: {
+                blueprintId: "small-solar-array",
+                displayName: "Small Solar Array Blueprint",
+                output: { itemType: "module", moduleType: "small-solar-array", quantity: 1 },
+                runtimeAttributes: {
+                  health: 100,
+                  status: "idle",
+                  powerDrawKw: { offline: 0, idle: 0, active: 0, damaged: 0 },
+                },
+                capabilities: ["solar-generation"],
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        if (String(url) === "https://planet.turingguild.com/catalog/blueprints/survey-rover") {
+          return new Response(
+            JSON.stringify({
+              blueprint: {
+                blueprintId: "survey-rover",
+                displayName: "Survey Rover Blueprint",
+                output: { itemType: "rover", quantity: 1 },
+                runtimeAttributes: { health: 100 },
+                capabilities: ["starter-survey"],
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return new Response(
+          JSON.stringify({ error: { message: "not found" } }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      },
       randomUuid: () => "33333333-3333-4333-8333-333333333333",
       now: () => new Date("2026-07-06T12:10:00.000Z"),
     },
@@ -1519,6 +1564,7 @@ test("module CRUD uses local modules and saved module blueprints", async () => {
     createdAt: "2026-07-06T12:10:00.000Z",
     updatedAt: "2026-07-06T12:10:00.000Z",
   });
+  expect(blueprintRequests).toContain("https://planet.turingguild.com/catalog/blueprints/small-solar-array");
 
   const updated = await updateModule(
     created.id,
@@ -1532,7 +1578,23 @@ test("module CRUD uses local modules and saved module blueprints", async () => {
   expect(updated.updatedAt).toBe("2026-07-06T12:20:00.000Z");
 
   await expect(
-    createModule({ blueprintId: "survey-rover" }, { cwd: tempDir }),
+    createModule(
+      { blueprintId: "survey-rover" },
+      {
+        cwd: tempDir,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              blueprint: {
+                blueprintId: "survey-rover",
+                displayName: "Survey Rover Blueprint",
+                output: { itemType: "rover", quantity: 1 },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      },
+    ),
   ).rejects.toThrow("Blueprint does not output a module: survey-rover");
 
   await deleteModule(created.id, { cwd: tempDir });
@@ -1663,7 +1725,7 @@ test("checkLocalConfig can verify project configuration from outside the project
     expect(config).toEqual({
       baseUrl: "https://planet.turingguild.com",
       tokenLoaded: true,
-      registrationFile: getRegistrationFilePath(tempDir),
+      databaseFile: join(tempDir, ".habitat", "habitat.sqlite"),
     });
   } finally {
     await rm(outsideDir, { recursive: true, force: true });
@@ -1682,7 +1744,7 @@ test("checkLocalConfig honors HABITAT_PROJECT_ROOT for installed launchers", asy
       cwd: outsideDir,
     });
 
-    expect(config.registrationFile).toBe(getRegistrationFilePath(tempDir));
+    expect(config.databaseFile).toBe(join(tempDir, ".habitat", "habitat.sqlite"));
     expect(config.tokenLoaded).toBe(true);
   } finally {
     if (previousProjectRoot === undefined) {
