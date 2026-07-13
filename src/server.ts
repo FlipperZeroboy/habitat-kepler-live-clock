@@ -95,7 +95,7 @@ export function getServerConfig(env: Record<string, string | undefined> = proces
   }
 
   return {
-    host: env.HABITAT_API_HOST || "localhost",
+    host: env.HABITAT_API_HOST || "0.0.0.0",
     port,
   };
 }

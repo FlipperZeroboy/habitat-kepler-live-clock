@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { createApp, getServerConfig } from "../src/server";
 
-test("server config defaults to localhost on port 8787", () => {
-  expect(getServerConfig({})).toEqual({ host: "localhost", port: 8787 });
+test("server config defaults to all interfaces on port 8787", () => {
+  expect(getServerConfig({})).toEqual({ host: "0.0.0.0", port: 8787 });
 });
 
 test("server config accepts host and port environment overrides", () => {
