@@ -183,6 +183,12 @@ export type InventoryAddResult = InventoryEntry & {
   storageModuleName: string;
 };
 
+export type InventoryRemoveResult = InventoryEntry & {
+  removed: number;
+  storageModuleId: string;
+  storageModuleName: string;
+};
+
 export type LocalRegistration = {
   habitatUuid: string;
   habitatId: string;
@@ -1201,6 +1207,62 @@ export async function addInventoryResource(
     quantity: nextQuantity,
     storageModuleId: storageModule.id,
     storageModuleName: storageModule.displayName,
+  };
+}
+
+export async function removeInventoryResource(
+  resource: string,
+  quantity: number,
+  options: RuntimeOptions = {},
+): Promise<InventoryRemoveResult> {
+  if (!resource.trim()) {
+    throw new Error("Resource name is required.");
+  }
+
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    throw new Error("Inventory quantity must be a positive number.");
+  }
+
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const storageModules = onlineStorageModules(registration.modules);
+  const available = storageModules.reduce((total, module) => {
+    const storedResources = parseStoredResources(module);
+    return total + numericAttribute(storedResources[resource]);
+  }, 0);
+
+  if (available < quantity) {
+    throw new Error(`Not enough ${resource} in local inventory.`);
+  }
+
+  let remaining = quantity;
+  let storageModule: HabitatModule | undefined;
+
+  for (const module of storageModules) {
+    const storedResources = parseStoredResources(module);
+    const currentQuantity = numericAttribute(storedResources[resource]);
+    const removed = Math.min(currentQuantity, remaining);
+
+    if (removed <= 0) {
+      continue;
+    }
+
+    storageModule ??= module;
+    storedResources[resource] = currentQuantity - removed;
+    remaining -= removed;
+
+    if (remaining <= 0) {
+      break;
+    }
+  }
+
+  await saveLocalRegistration(cwd, registration);
+
+  return {
+    resource,
+    removed: quantity,
+    quantity: aggregateInventory(registration.modules).find((entry) => entry.resource === resource)?.quantity ?? 0,
+    storageModuleId: storageModule?.id ?? storageModules[0]?.id ?? "",
+    storageModuleName: storageModule?.displayName ?? storageModules[0]?.displayName ?? "",
   };
 }
 

@@ -21,6 +21,7 @@ import {
   loadLocalRegistration,
   LocalRegistration,
   registerHabitat,
+  removeInventoryResource,
   setModuleStatus,
   showBlueprint,
   showModule,
@@ -1020,6 +1021,57 @@ test("inventory add and list use the local supply cache", async () => {
     ferrite: 100,
     "silicate-glass": 45,
   });
+});
+
+test("inventory remove subtracts resources from the local supply cache", async () => {
+  const registration: LocalRegistration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
+    starterModules: [],
+    blueprints: [],
+    modules: [],
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
+    tickHistory: [],
+  };
+
+  registration.modules.push({
+    id: "cache-1",
+    habitatId: registration.habitatId,
+    blueprintId: "supply-cache",
+    moduleType: "supply-cache",
+    displayName: "Supply Cache",
+    connectedTo: [],
+    runtimeAttributes: {
+      health: 100,
+      status: "active",
+      storedResources: { ferrite: 10 },
+    },
+    capabilities: ["storage"],
+    source: "kepler-registration",
+    createdAt: "2026-07-06T12:00:00.000Z",
+    updatedAt: "2026-07-06T12:00:00.000Z",
+  });
+  await getLocalStateStore(tempDir).save(registration);
+
+  await expect(removeInventoryResource("ferrite", 3, { cwd: tempDir })).resolves.toEqual({
+    resource: "ferrite",
+    removed: 3,
+    quantity: 7,
+    storageModuleId: "cache-1",
+    storageModuleName: "Supply Cache",
+  });
+  await expect(removeInventoryResource("ferrite", 8, { cwd: tempDir })).rejects.toThrow(
+    "Not enough ferrite in local inventory.",
+  );
 });
 
 test("tickHabitat advances one-second ticks and drains battery power", async () => {

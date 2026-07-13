@@ -8,11 +8,13 @@
   },
   "scripts": {
     "start": "bun run src/index.ts",
+    "server": "bun run src/server.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "hono": "^4.12.29"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

@@ -1,10 +1,11 @@
 import { Command } from "commander";
 import {
-  cancelConstructionJob,
-  listConstructionJobs,
-  listModules,
-  type HabitatModule,
-} from "../habitat";
+  createApiClient,
+  type ConstructionCancelResponse,
+  type ConstructionJobsResponse,
+  type ModulesResponse,
+} from "../api-client";
+import type { HabitatModule } from "../habitat";
 import { formatNumber, printError } from "../cli-utils";
 
 function moduleHandle(module: HabitatModule, modules: HabitatModule[]) {
@@ -16,8 +17,8 @@ function moduleHandle(module: HabitatModule, modules: HabitatModule[]) {
   return `${module.moduleType}-${typeIndex}`;
 }
 
-async function resolveModuleId(handle: string) {
-  const modules = await listModules();
+async function resolveModuleId(handle: string, apiClient: ReturnType<typeof createApiClient>) {
+  const modules = (await apiClient.get<ModulesResponse>("/modules")).modules;
   const index = Number(handle);
 
   if (Number.isInteger(index) && index > 0 && String(index) === handle) {
@@ -40,6 +41,7 @@ async function resolveModuleId(handle: string) {
 }
 
 export function createConstructionCommand() {
+  const apiClient = createApiClient();
   const constructionCommand = new Command("construction")
     .description("Inspect local construction jobs.")
     .summary("Show local construction progress");
@@ -49,7 +51,7 @@ export function createConstructionCommand() {
     .description("Show active local construction jobs and remaining build time.")
     .action(async () => {
       try {
-        const jobs = await listConstructionJobs();
+        const jobs = (await apiClient.get<ConstructionJobsResponse>("/construction")).jobs;
 
         if (jobs.length === 0) {
           console.log("No active construction jobs.");
@@ -75,8 +77,8 @@ export function createConstructionCommand() {
     .argument("<facility>", "Construction facility number, friendly handle, or full module id")
     .action(async (facilityHandle: string) => {
       try {
-        const facilityId = await resolveModuleId(facilityHandle);
-        const result = await cancelConstructionJob(facilityId);
+        const facilityId = await resolveModuleId(facilityHandle, apiClient);
+        const result = (await apiClient.delete<ConstructionCancelResponse>(`/construction/${encodeURIComponent(facilityId)}`)).construction;
 
         console.log(`Canceled construction job ${result.jobId} for ${result.blueprintId}.`);
         console.log(`${result.facilityName} is available again.`);

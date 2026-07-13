@@ -1,8 +1,9 @@
 import { Command } from "commander";
-import { getSolarIrradiance } from "../habitat";
+import { createApiClient } from "../api-client";
 import { formatNumber, printError } from "../cli-utils";
 
 export function createSolarCommand() {
+  const apiClient = createApiClient();
   const solarCommand = new Command("solar")
     .description("Inspect Kepler sunlight used by local solar charging.")
     .summary("Read current planet-side solar irradiance");
@@ -12,7 +13,9 @@ export function createSolarCommand() {
     .description("Show the current Kepler solar irradiance.")
     .action(async () => {
       try {
-        const solar = await getSolarIrradiance();
+        const solar = await apiClient.get<{
+          solarIrradiance: { wPerM2: number; condition: string };
+        }>("/solar/irradiance");
         console.log(`Solar Irradiance: ${formatNumber(solar.solarIrradiance.wPerM2)} W/m2`);
         console.log(`Condition: ${solar.solarIrradiance.condition}`);
 

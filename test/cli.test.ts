@@ -4,6 +4,22 @@ import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getLocalStateStore } from "../src/local-state";
+import {
+  addInventoryResource,
+  createModule,
+  deleteModule,
+  dryRunConstruction,
+  cancelConstructionJob,
+  listInventory,
+  listConstructionJobs,
+  listModules,
+  removeInventoryResource,
+  showModule,
+  startConstruction,
+  tickHabitat,
+  updateModule,
+} from "../src/habitat";
+import { createApp } from "../src/server";
 
 function getRegistrationFilePath(cwd: string) {
   return join(cwd, ".habitat", "registration.json");
@@ -77,6 +93,8 @@ test("help advertises Kepler registration, catalog, and local module commands", 
 
 let tempDir: string;
 let server: ReturnType<typeof Bun.serve> | undefined;
+let backendServer: ReturnType<typeof Bun.serve> | undefined;
+let previousApiBaseUrl: string | undefined;
 
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "habitat-cli-"));
@@ -131,6 +149,24 @@ beforeEach(async () => {
     ) + "\n",
     "utf8",
   );
+  previousApiBaseUrl = process.env.HABITAT_API_BASE_URL;
+  const backendApp = createApp({
+    listModules: () => listModules({ cwd: tempDir }),
+    showModule: (id) => showModule(id, { cwd: tempDir }),
+    createModule: (input) => createModule(input, { cwd: tempDir }),
+    updateModule: (id, input) => updateModule(id, input, { cwd: tempDir }),
+    deleteModule: (id) => deleteModule(id, { cwd: tempDir }),
+    listInventory: () => listInventory({ cwd: tempDir }),
+    addInventoryResource: (resource, quantity) => addInventoryResource(resource, quantity, { cwd: tempDir }),
+    removeInventoryResource: (resource, quantity) => removeInventoryResource(resource, quantity, { cwd: tempDir }),
+    tickHabitat: (count) => tickHabitat(count, { cwd: tempDir }),
+    dryRunConstruction: (blueprintId) => dryRunConstruction(blueprintId, { cwd: tempDir }),
+    startConstruction: (blueprintId) => startConstruction(blueprintId, { cwd: tempDir }),
+    listConstructionJobs: () => listConstructionJobs({ cwd: tempDir }),
+    cancelConstructionJob: (facilityId) => cancelConstructionJob(facilityId, { cwd: tempDir }),
+  });
+  backendServer = Bun.serve({ port: 0, fetch: backendApp.fetch });
+  process.env.HABITAT_API_BASE_URL = `http://127.0.0.1:${backendServer.port}`;
 });
 
 async function writeTickRegistration() {
@@ -203,6 +239,13 @@ async function writeTickRegistration() {
 afterEach(async () => {
   server?.stop(true);
   server = undefined;
+  backendServer?.stop(true);
+  backendServer = undefined;
+  if (previousApiBaseUrl === undefined) {
+    delete process.env.HABITAT_API_BASE_URL;
+  } else {
+    process.env.HABITAT_API_BASE_URL = previousApiBaseUrl;
+  }
   await rm(tempDir, { recursive: true, force: true });
 });
 
@@ -211,10 +254,7 @@ function startBlueprintCatalogServer() {
     port: 0,
     fetch(request) {
       const url = new URL(request.url);
-
-      if (request.headers.get("authorization") !== "Bearer test-token") {
-        return Response.json({ error: { message: "unauthorized" } }, { status: 401 });
-      }
+      const isBackendRequest = !request.headers.get("authorization");
 
       if (url.pathname === "/catalog/blueprints") {
         return Response.json({
@@ -274,8 +314,7 @@ function startBlueprintCatalogServer() {
       }
 
       if (url.pathname === "/catalog/blueprints/survey-rover") {
-        return Response.json({
-          blueprint: {
+        const blueprint = {
             id: "bp-1",
             blueprintId: "survey-rover",
             displayName: "Survey Rover",
@@ -290,13 +329,12 @@ function startBlueprintCatalogServer() {
             unlocks: ["site-survey"],
             repeatable: true,
             capabilities: ["resource-survey"],
-          },
-        });
+          };
+        return Response.json(isBackendRequest ? blueprint : { blueprint });
       }
 
       if (url.pathname === "/catalog/blueprints/small-solar-array") {
-        return Response.json({
-          blueprint: {
+        const blueprint = {
             id: "bp-solar",
             blueprintId: "small-solar-array",
             displayName: "Small Solar Array Blueprint",
@@ -312,8 +350,12 @@ function startBlueprintCatalogServer() {
             repeatable: true,
             runtimeAttributes: { health: 100, status: "online", powerGenerationKw: 12 },
             capabilities: ["solar-generation"],
-          },
-        });
+          };
+        return Response.json(isBackendRequest ? blueprint : { blueprint });
+      }
+
+      if (isBackendRequest && url.pathname.startsWith("/catalog/blueprints/")) {
+        return Response.json({ error: { message: `Blueprint not found: ${url.pathname.split("/").pop()}` } }, { status: 404 });
       }
 
       return Response.json({ error: { message: "not found" } }, { status: 404 });
@@ -329,7 +371,7 @@ function startSolarStatusServer() {
     fetch(request) {
       const url = new URL(request.url);
 
-      if (url.pathname === "/world/solar-irradiance") {
+      if (url.pathname === "/world/solar-irradiance" || url.pathname === "/solar/irradiance") {
         return Response.json({
           solarIrradiance: {
             wPerM2: 900,
@@ -345,6 +387,96 @@ function startSolarStatusServer() {
   return `http://127.0.0.1:${server.port}`;
 }
 
+function startRegistrationBackendServer() {
+  const requests: string[] = [];
+  server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      requests.push(`${request.method} ${url.pathname}`);
+
+      if (request.method === "POST" && url.pathname === "/registration") {
+        return Response.json({
+          registration: {
+            habitatUuid: "11111111-1111-4111-8111-111111111111",
+            habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+            displayName: "Artemis Ridge",
+            apiToken: "habitat-api-token",
+          },
+        }, { status: 201 });
+      }
+
+      if (request.method === "GET" && url.pathname === "/status") {
+        return Response.json({
+          status: {
+            habitat: {
+              id: "habitat_11111111_1111_4111_8111_111111111111",
+              habitatSlug: "artemis-ridge",
+              displayName: "Artemis Ridge",
+              catalogVersion: "2026-06-24",
+              status: "active",
+              lastSeenAt: "2026-07-10T12:00:00.000Z",
+            },
+            currentTick: 60,
+            moduleCount: 2,
+            powerSummary: {
+              totalPowerDrawKw: 7,
+              energyUsedKwh: 0.11667,
+              batteryEnergyKwh: 100,
+              batteryCapacityKwh: 200,
+              powerShortageKwh: 0,
+            },
+          },
+        });
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/registration") {
+        return Response.json({ registration: null, habitatId: "habitat_11111111_1111_4111_8111_111111111111" });
+      }
+
+      return Response.json({ error: { message: "not found" } }, { status: 404 });
+    },
+  });
+
+  return { baseUrl: `http://127.0.0.1:${server.port}`, requests };
+}
+
+test("registration lifecycle commands use the backend and keep friendly output", async () => {
+  const backend = startRegistrationBackendServer();
+  const env = { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: backend.baseUrl };
+
+  const registerProc = Bun.spawn(["bun", "run", "src/index.ts", "register", "--name", "Artemis Ridge"], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env,
+  });
+  const registerOutput = await new Response(registerProc.stdout).text();
+  const registerErrorOutput = await new Response(registerProc.stderr).text();
+  expect(await registerProc.exited).toBe(0);
+  expect(registerErrorOutput).toBe("");
+  expect(registerOutput).toContain("Registered habitat: Artemis Ridge");
+
+  const statusProc = Bun.spawn(["bun", "run", "src/index.ts", "status"], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env,
+  });
+  const statusOutput = await new Response(statusProc.stdout).text();
+  expect(await statusProc.exited).toBe(0);
+  expect(statusOutput).toContain("Habitat ID: habitat_11111111_1111_4111_8111_111111111111");
+  expect(statusOutput).toContain("Current Tick: 60");
+
+  const unregisterProc = Bun.spawn(["bun", "run", "src/index.ts", "unregister"], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env,
+  });
+  const unregisterOutput = await new Response(unregisterProc.stdout).text();
+  const unregisterErrorOutput = await new Response(unregisterProc.stderr).text();
+  expect(await unregisterProc.exited).toBe(0);
+  expect(unregisterErrorOutput).toBe("");
+  expect(unregisterOutput).toContain("Unregistered habitat: habitat_11111111_1111_4111_8111_111111111111");
+  expect(backend.requests).toEqual([
+    "POST /registration",
+    "GET /status",
+    "DELETE /registration",
+  ]);
+});
+
 test("blueprint list and show read the Kepler catalog without changing local state", async () => {
   const baseUrl = startBlueprintCatalogServer();
   await writeFile(
@@ -358,7 +490,7 @@ test("blueprint list and show read the Kepler catalog without changing local sta
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: baseUrl },
   });
 
   const listOutput = await new Response(listProc.stdout).text();
@@ -376,7 +508,7 @@ test("blueprint list and show read the Kepler catalog without changing local sta
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: baseUrl },
   });
 
   const showOutput = await new Response(showProc.stdout).text();
@@ -395,7 +527,7 @@ test("blueprint list and show read the Kepler catalog without changing local sta
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: baseUrl },
   });
 
   const missingOutput = await new Response(missingProc.stdout).text();
@@ -419,7 +551,7 @@ test("resource list reads possible Kepler resource types without creating invent
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: baseUrl },
   });
 
   const output = await new Response(proc.stdout).text();
@@ -872,10 +1004,23 @@ test("inventory add and list update the local supply cache", async () => {
   expect(output).toContain("ferrite | 90");
   expect(output).toContain("silicate-glass | 45");
 
+  const removeProc = Bun.spawn(["bun", "run", "src/index.ts", "inventory", "remove", "ferrite", "5"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+  const removeOutput = await new Response(removeProc.stdout).text();
+  const removeErrorOutput = await new Response(removeProc.stderr).text();
+  expect(await removeProc.exited).toBe(0);
+  expect(removeErrorOutput).toBe("");
+  expect(removeOutput).toContain("Removed 5 ferrite from Supply Cache.");
+  expect(removeOutput).toContain("Current Quantity: 85");
+
   const stored = JSON.parse(await readFile(join(tempDir, ".habitat", "habitat-modules.json"), "utf8"));
   const cache = stored.find((module: { id: string }) => module.id === "cache-1");
   expect(cache.runtimeAttributes.storedResources).toEqual({
-    ferrite: 90,
+    ferrite: 85,
     "silicate-glass": 45,
     "conductive-ore": 18,
   });
@@ -934,6 +1079,22 @@ test("module status prints current power table and one-tick energy cost", async 
   expect(output).toContain("5 kW");
   expect(output).toContain("Total Power Draw: 7 kW");
   expect(output).toContain("Energy Cost Per Tick: 0.00194 kWh");
+});
+
+test("power overview preserves the readable power table through the backend", async () => {
+  const proc = Bun.spawn(["bun", "run", "src/index.ts", "power", "overview"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const output = await new Response(proc.stdout).text();
+  const errorOutput = await new Response(proc.stderr).text();
+  expect(await proc.exited).toBe(0);
+  expect(errorOutput).toBe("");
+  expect(output).toContain("Command Module");
+  expect(output).toContain("Total Power Draw: 7 kW");
 });
 
 test("module status explains effective construction state and depleted batteries", async () => {
@@ -1282,7 +1443,7 @@ test("solar status prints the current Kepler irradiance in beginner-friendly lan
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir, HABITAT_API_BASE_URL: baseUrl },
   });
 
   const output = await new Response(solarProc.stdout).text();

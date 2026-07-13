@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { listResourceCatalog } from "../habitat";
+import { createApiClient } from "../api-client";
+import type { ResourceCatalogResponse } from "../habitat";
 import { printError } from "../cli-utils";
 import {
   printResourceCatalogNotes,
@@ -7,6 +8,7 @@ import {
 } from "../formatters";
 
 export function createResourceCommand() {
+  const apiClient = createApiClient();
   const resourceCommand = new Command("resource")
     .description("Inspect official Kepler resource types.")
     .summary("Read-only Kepler resource catalog");
@@ -16,7 +18,7 @@ export function createResourceCommand() {
     .description("List possible resource types from the official Kepler catalog.")
     .action(async () => {
       try {
-        const catalog = await listResourceCatalog();
+        const catalog = await apiClient.get<ResourceCatalogResponse>("/catalog/resources");
 
         console.log(`Catalog Version: ${catalog.catalogVersion}`);
         printResourceCatalogNotes();

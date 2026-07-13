@@ -1,13 +1,11 @@
 import { Command } from "commander";
 import {
-  createModule,
-  deleteModule,
-  listModules,
-  setModuleStatus,
-  showModule,
-  updateModule,
-  type HabitatModule,
-} from "../habitat";
+  createApiClient,
+  type ModuleDeleteResponse,
+  type ModuleResponse,
+  type ModulesResponse,
+} from "../api-client";
+import type { HabitatModule } from "../habitat";
 import { formatNumber, parseHealth, printError } from "../cli-utils";
 import {
   moduleHealth,
@@ -26,8 +24,17 @@ function moduleHandle(module: HabitatModule, modules: HabitatModule[]) {
   return `${module.moduleType}-${typeIndex}`;
 }
 
-async function resolveModuleId(handle: string) {
-  const modules = await listModules();
+function assertCliStatus(status: string) {
+  const statuses = ["offline", "idle", "online", "active", "damaged"];
+
+  if (!statuses.includes(status)) {
+    throw new Error(`Status must be one of: ${statuses.join(", ")}.`);
+  }
+}
+
+async function resolveModuleId(handle: string, apiClient: ReturnType<typeof createApiClient>) {
+  const response = await apiClient.get<ModulesResponse>("/modules");
+  const modules = response.modules;
   const index = Number(handle);
 
   if (Number.isInteger(index) && index > 0 && String(index) === handle) {
@@ -50,6 +57,7 @@ async function resolveModuleId(handle: string) {
 }
 
 export function createModuleCommand() {
+  const apiClient = createApiClient();
   const moduleCommand = new Command("module")
     .description("Manage local Habitat modules.")
     .summary("CRUD for local modules");
@@ -59,7 +67,7 @@ export function createModuleCommand() {
     .description("List local modules as: id | blueprintId | displayName | status | health.")
     .action(async () => {
       try {
-        const modules = await listModules();
+        const modules = (await apiClient.get<ModulesResponse>("/modules")).modules;
 
         if (modules.length === 0) {
           console.log("No modules found.");
@@ -82,7 +90,7 @@ export function createModuleCommand() {
     .description("Show each module's current state and power draw.")
     .action(async () => {
       try {
-        const modules = await listModules();
+        const modules = (await apiClient.get<ModulesResponse>("/modules")).modules;
 
         if (modules.length === 0) {
           console.log("No modules found.");
@@ -102,8 +110,9 @@ export function createModuleCommand() {
     .argument("<status>", "One of: offline, idle, online, active, damaged")
     .action(async (moduleHandle: string, status: string) => {
       try {
-        const id = await resolveModuleId(moduleHandle);
-        const module = await setModuleStatus(id, status);
+        assertCliStatus(status);
+        const id = await resolveModuleId(moduleHandle, apiClient);
+        const module = (await apiClient.put<ModuleResponse>(`/modules/${encodeURIComponent(id)}`, { status })).module;
         console.log(`Updated module ${module.id} to ${moduleStatus(module)}.`);
         console.log(`Current Power Draw: ${formatNumber(modulePowerDrawKw(module))} kW`);
       } catch (error) {
@@ -117,8 +126,8 @@ export function createModuleCommand() {
     .argument("<module>", "Module number from list, or full module id")
     .action(async (moduleHandle: string) => {
       try {
-        const id = await resolveModuleId(moduleHandle);
-        printModule(await showModule(id));
+        const id = await resolveModuleId(moduleHandle, apiClient);
+        printModule((await apiClient.get<ModuleResponse>(`/modules/${encodeURIComponent(id)}`)).module);
       } catch (error) {
         printError(error);
       }
@@ -131,10 +140,10 @@ export function createModuleCommand() {
     .option("--name <name>", "Module display name")
     .action(async (options: { blueprintId: string; name?: string }) => {
       try {
-        const module = await createModule({
+        const module = (await apiClient.put<ModuleResponse>("/modules", {
           blueprintId: options.blueprintId,
           name: options.name,
-        });
+        })).module;
         console.log(`Created module: ${module.id}`);
       } catch (error) {
         printError(error);
@@ -155,12 +164,12 @@ export function createModuleCommand() {
         options: { name?: string; status?: string; health?: number; condition?: number },
       ) => {
         try {
-          const id = await resolveModuleId(moduleHandle);
-          const module = await updateModule(id, {
+          const id = await resolveModuleId(moduleHandle, apiClient);
+          const module = (await apiClient.put<ModuleResponse>(`/modules/${encodeURIComponent(id)}`, {
             name: options.name,
             status: options.status,
             health: options.health ?? options.condition,
-          });
+          })).module;
           console.log(`Updated module: ${module.id}`);
         } catch (error) {
           printError(error);
@@ -174,9 +183,9 @@ export function createModuleCommand() {
     .argument("<module>", "Module number from list, or full module id")
     .action(async (moduleHandle: string) => {
       try {
-        const id = await resolveModuleId(moduleHandle);
-        await deleteModule(id);
-        console.log(`Deleted module: ${id}`);
+        const id = await resolveModuleId(moduleHandle, apiClient);
+        const response = await apiClient.delete<ModuleDeleteResponse>(`/modules/${encodeURIComponent(id)}`);
+        console.log(`Deleted module: ${response.moduleId}`);
       } catch (error) {
         printError(error);
       }

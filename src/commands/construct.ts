@@ -1,5 +1,9 @@
 import { Command } from "commander";
-import { dryRunConstruction, startConstruction } from "../habitat";
+import {
+  createApiClient,
+  type ConstructionDryRunResponse,
+  type ConstructionStartResponse,
+} from "../api-client";
 import { formatTicksAsHours, printError } from "../cli-utils";
 
 function yesNo(value: boolean) {
@@ -22,6 +26,7 @@ function formatModuleToCreate(output: Record<string, unknown>) {
 }
 
 export function createConstructCommand() {
+  const apiClient = createApiClient();
   return new Command("construct")
     .description("Prepare local module construction from a Kepler blueprint.")
     .argument("<blueprint-id>", "Official Kepler blueprint id")
@@ -29,7 +34,9 @@ export function createConstructCommand() {
     .action(async (blueprintId: string, options: { dryRun?: boolean }) => {
       try {
         if (!options.dryRun) {
-          const result = await startConstruction(blueprintId);
+          const result = (await apiClient.post<ConstructionStartResponse>("/construction", {
+            blueprintId,
+          })).construction;
 
           console.log(`Started Construction: ${result.job.blueprintId}`);
           console.log(`Construction Job: ${result.job.id}`);
@@ -43,7 +50,10 @@ export function createConstructCommand() {
           return;
         }
 
-        const result = await dryRunConstruction(blueprintId);
+        const result = (await apiClient.post<ConstructionDryRunResponse>("/construction", {
+          blueprintId,
+          dryRun: true,
+        })).construction;
         const facilityType = typeof result.facilityRequirement.moduleType === "string"
           ? result.facilityRequirement.moduleType
           : "none";
