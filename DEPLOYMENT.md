@@ -6,6 +6,20 @@
 - The code was cloned from the public Habitat GitHub repository onto the OpenClaw LXC.
 - The backend was started manually with `bun run server` from `~/habitat-cli`.
 
+## Future deployment cycle
+
+After pushing a new Habitat version from the laptop, update the OpenClaw server from an SSH session:
+
+```sh
+cd ~/habitat-cli
+git pull --ff-only
+bun install
+systemctl --user restart habitat-api.service
+systemctl --user --no-pager status habitat-api.service
+```
+
+`git pull` updates the deployed files on disk. Restarting the user service replaces the running Bun process so it uses the updated code. The service unit is already enabled, so a restart is sufficient for normal code deployments; rerun the unit installation steps if the service file itself changes.
+
 ## Verification evidence
 
 The API worked locally on the LXC. The server listened on `0.0.0.0:8787`, and this request returned the existing Habitat registration rather than `null`:
