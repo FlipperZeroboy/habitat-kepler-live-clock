@@ -159,6 +159,36 @@ test("catalog and solar routes proxy structured backend data", async () => {
   });
 });
 
+test("scan route maps validated query parameters and preserves the Kepler response", async () => {
+  let requested: unknown;
+  const scan = { scan: { modelVersion: "resource-probability-v2", origin: { x: 3, y: -2 }, sensorStrength: 60, radiusTiles: 0, tiles: [] } };
+  const app = createApp({
+    scanHabitat: async (options) => {
+      requested = options;
+      return scan;
+    },
+  });
+
+  const response = await app.request("/scan?x=3&y=-2&strength=60");
+
+  expect(response.status).toBe(200);
+  expect(requested).toEqual({ x: 3, y: -2, sensorStrength: 60, radiusTiles: 0 });
+  expect(await response.json()).toEqual(scan);
+});
+
+test("scan route rejects invalid query parameters with structured errors", async () => {
+  const app = createApp({ scanHabitat: async () => ({ scan: {} }) });
+  for (const [query, message] of [
+    ["y=0&strength=60", "scan x must be an integer"],
+    ["x=3&y=-2&strength=101", "sensor strength must be an integer between 0 and 100"],
+    ["x=3&y=-2&strength=60&radius=6", "scan radius must be an integer between 0 and 5"],
+  ]) {
+    const response = await app.request(`/scan?${query}`);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { message } });
+  }
+});
+
 test("backend errors are returned as structured JSON", async () => {
   const app = createApp({
     getRegistration: async () => {

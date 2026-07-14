@@ -2,6 +2,9 @@ import type {
   HabitatModule,
   IndustryResource,
   ProductionBlueprint,
+  WorldScanProbability,
+  WorldScanQuantityEstimate,
+  WorldScanTile,
 } from "./habitat";
 import { formatJsonField, formatNumber } from "./cli-utils";
 
@@ -239,4 +242,60 @@ export function printResourceCatalogNotes() {
   console.log("Resource catalog: possible resource types in the Kepler world.");
   console.log("Local inventory: resources your habitat owns are managed with `habitat inventory`.");
   console.log("Blueprint requirements: resources or modules needed to build something later.");
+}
+
+function resourceName(resourceType: string | null) {
+  return resourceType ?? "none";
+}
+
+function quantityText(quantity: WorldScanQuantityEstimate | null) {
+  if (!quantity) {
+    return "none";
+  }
+  if (quantity.exact || quantity.minimumKg === quantity.maximumKg) {
+    return `${quantity.estimatedKg} ${quantity.unit} (exact)`;
+  }
+  return `${quantity.minimumKg}-${quantity.maximumKg} ${quantity.unit} (estimated; about ${quantity.estimatedKg} ${quantity.unit})`;
+}
+
+function probabilityText(probability: WorldScanProbability) {
+  return `${resourceName(probability.resourceType)}: ${formatNumber(probability.probabilityPct)}%`;
+}
+
+export function printWorldScan(scan: {
+  origin: { x: number; y: number };
+  sensorStrength: number;
+  radiusTiles: number;
+  tiles: WorldScanTile[];
+}) {
+  console.log(`Scan Origin: (${scan.origin.x}, ${scan.origin.y})`);
+  console.log(`Sensor Strength: ${scan.sensorStrength}`);
+  console.log(`Radius: ${scan.radiusTiles} tiles`);
+
+  if (scan.radiusTiles === 0) {
+    const tile = scan.tiles[0];
+    if (!tile) {
+      console.log("No tiles returned.");
+      return;
+    }
+
+    console.log(`Terrain: ${tile.terrain}`);
+    console.log(`Distance: ${formatNumber(tile.distanceTiles)} tiles`);
+    console.log(`Most Likely Resource: ${resourceName(tile.topCandidate.resourceType)} (${formatNumber(tile.topCandidate.probabilityPct)}%)`);
+    console.log(`Quantity: ${quantityText(tile.quantityEstimate)}`);
+    console.log("Probability Distribution:");
+    for (const probability of tile.probabilities) {
+      console.log(`  ${probabilityText(probability)}`);
+    }
+    return;
+  }
+
+  console.log(`Tiles: ${scan.tiles.length}`);
+  for (const tile of scan.tiles) {
+    console.log(
+      `Tile (${tile.x}, ${tile.y}) | Distance: ${formatNumber(tile.distanceTiles)} tiles | Terrain: ${tile.terrain}`,
+    );
+    console.log(`  Most Likely Resource: ${resourceName(tile.topCandidate.resourceType)} (${formatNumber(tile.topCandidate.probabilityPct)}%)`);
+    console.log(`  Quantity: ${quantityText(tile.quantityEstimate)}`);
+  }
 }

@@ -80,6 +80,7 @@ test("help advertises Kepler registration, catalog, and local module commands", 
   expect(output).toContain("unregister");
   expect(output).toContain("config");
   expect(output).toContain("solar");
+  expect(output).toContain("scan");
   expect(output).toContain("blueprint");
   expect(output).toContain("resource");
   expect(output).toContain("module");
@@ -164,6 +165,55 @@ beforeEach(async () => {
     startConstruction: (blueprintId) => startConstruction(blueprintId, { cwd: tempDir }),
     listConstructionJobs: () => listConstructionJobs({ cwd: tempDir }),
     cancelConstructionJob: (facilityId) => cancelConstructionJob(facilityId, { cwd: tempDir }),
+    scanHabitat: async ({ x, y, sensorStrength, radiusTiles }) => ({
+      scan: {
+        modelVersion: "resource-probability-v2",
+        origin: { x, y },
+        sensorStrength,
+        radiusTiles,
+        tiles: radiusTiles === 0
+          ? [{
+              x,
+              y,
+              terrain: "flat",
+              distanceTiles: 0,
+              probabilities: [
+                { resourceType: "ferrite", probabilityPct: 100 },
+                { resourceType: null, probabilityPct: 0 },
+                { resourceType: "water", probabilityPct: 0 },
+              ],
+              topCandidate: { resourceType: "ferrite", probabilityPct: 100 },
+              quantityEstimate: {
+                resourceType: "ferrite",
+                unit: "kg",
+                estimatedKg: 184,
+                minimumKg: 184,
+                maximumKg: 184,
+                exact: true,
+              },
+            }]
+          : [{
+              x: x + 1,
+              y,
+              terrain: "flat",
+              distanceTiles: 1,
+              probabilities: [
+                { resourceType: "water", probabilityPct: 55 },
+                { resourceType: null, probabilityPct: 20 },
+                { resourceType: "ferrite", probabilityPct: 25 },
+              ],
+              topCandidate: { resourceType: "water", probabilityPct: 55 },
+              quantityEstimate: {
+                resourceType: "water",
+                unit: "kg",
+                estimatedKg: 90,
+                minimumKg: 60,
+                maximumKg: 120,
+                exact: false,
+              },
+            }],
+      },
+    }),
   });
   backendServer = Bun.serve({ port: 0, fetch: backendApp.fetch });
   process.env.HABITAT_API_BASE_URL = `http://127.0.0.1:${backendServer.port}`;
@@ -1453,6 +1503,63 @@ test("solar status prints the current Kepler irradiance in beginner-friendly lan
   expect(output).toContain("Solar Irradiance: 900 W/m2");
   expect(output).toContain("Condition: clear");
   expect(output).toContain("Kepler reports clear conditions. Local solar charging will use this irradiance.");
+});
+
+test("scan defaults radius to zero and prints terrain, none, probabilities, and exact quantity", async () => {
+  const proc = Bun.spawn([
+    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "100",
+  ], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+  const output = await new Response(proc.stdout).text();
+  const errorOutput = await new Response(proc.stderr).text();
+
+  expect(await proc.exited).toBe(0);
+  expect(errorOutput).toBe("");
+  expect(output).toContain("Scan Origin: (3, -2)");
+  expect(output).toContain("Sensor Strength: 100");
+  expect(output).toContain("Radius: 0 tiles");
+  expect(output).toContain("Terrain: flat");
+  expect(output).toContain("Most Likely Resource: ferrite (100%)");
+  expect(output).toContain("Quantity: 184 kg (exact)");
+  expect(output).toContain("Probability Distribution:");
+  expect(output).toContain("ferrite: 100%");
+  expect(output).toContain("none: 0%");
+  expect(output).toContain("water: 0%");
+});
+
+test("scan summarizes a radius, preserves JSON, and validates CLI options", async () => {
+  const humanProc = Bun.spawn([
+    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "1",
+  ], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+  const humanOutput = await new Response(humanProc.stdout).text();
+  expect(await humanProc.exited).toBe(0);
+  expect(humanOutput).toContain("Tile (4, -2) | Distance: 1 tiles | Terrain: flat");
+  expect(humanOutput).toContain("Most Likely Resource: water (55%)");
+  expect(humanOutput).toContain("Quantity: 60-120 kg (estimated; about 90 kg)");
+
+  const jsonProc = Bun.spawn([
+    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "1", "--json",
+  ], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+  const jsonOutput = await new Response(jsonProc.stdout).text();
+  expect(await jsonProc.exited).toBe(0);
+  expect(JSON.parse(jsonOutput)).toMatchObject({
+    scan: { modelVersion: "resource-probability-v2", origin: { x: 3, y: -2 }, radiusTiles: 1 },
+  });
+
+  const invalidProc = Bun.spawn([
+    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "101",
+  ], {
+    cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+  const invalidError = await new Response(invalidProc.stderr).text();
+  expect(await invalidProc.exited).toBe(1);
+  expect(invalidError).toContain("sensor strength must be an integer between 0 and 100");
+  expect(invalidError).not.toContain("at ");
 });
 
 test("tick command reports completed construction jobs", async () => {

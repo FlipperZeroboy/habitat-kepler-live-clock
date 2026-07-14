@@ -22,6 +22,7 @@ import {
   LocalRegistration,
   registerHabitat,
   removeInventoryResource,
+  scanHabitat,
   setModuleStatus,
   showBlueprint,
   showModule,
@@ -1888,6 +1889,84 @@ test("getSolarIrradiance fetches and parses the current Kepler solar irradiance"
       condition: "clear",
     },
   });
+});
+
+test("scanHabitat uses the saved habitat ID and returns Kepler scan data unchanged", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
+    starterModules: [],
+    blueprints: [],
+    modules: [],
+    powerSummary: {
+      totalPowerDrawKw: 0,
+      energyUsedKwh: 0,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
+    tickHistory: [],
+  });
+  const expected = {
+    scan: {
+      modelVersion: "resource-probability-v2",
+      origin: { x: 3, y: -2 },
+      sensorStrength: 100,
+      radiusTiles: 0,
+      tiles: [{
+        x: 3,
+        y: -2,
+        terrain: "flat",
+        distanceTiles: 0,
+        probabilities: [{ resourceType: null, probabilityPct: 100 }],
+        topCandidate: { resourceType: null, probabilityPct: 100 },
+        quantityEstimate: null,
+      }],
+    },
+  };
+  let requestUrl = "";
+  let requestInit: RequestInit | undefined;
+
+  const result = await scanHabitat({
+    cwd: tempDir,
+    x: 3,
+    y: -2,
+    sensorStrength: 100,
+    radiusTiles: 0,
+    fetchImpl: async (input, init) => {
+      requestUrl = String(input);
+      requestInit = init;
+      return Response.json(expected);
+    },
+  });
+
+  expect(result).toEqual(expected);
+  const url = new URL(requestUrl);
+  expect(url.pathname).toBe("/world/scan");
+  expect(Object.fromEntries(url.searchParams)).toEqual({
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    x: "3",
+    y: "-2",
+    sensorStrength: "100",
+    radiusTiles: "0",
+  });
+  expect(requestInit?.method).toBe("GET");
+  expect((requestInit?.headers as Record<string, string>).Authorization).toBe("Bearer test-token");
+});
+
+test("scanHabitat rejects invalid coordinates, strength, and radius", async () => {
+  await expect(scanHabitat({ cwd: tempDir, x: 1.5, y: 0, sensorStrength: 50, radiusTiles: 0 })).rejects.toThrow(
+    "scan x must be an integer",
+  );
+  await expect(scanHabitat({ cwd: tempDir, x: 0, y: 0, sensorStrength: 101, radiusTiles: 0 })).rejects.toThrow(
+    "sensor strength must be an integer between 0 and 100",
+  );
+  await expect(scanHabitat({ cwd: tempDir, x: 0, y: 0, sensorStrength: 50, radiusTiles: 6 })).rejects.toThrow(
+    "scan radius must be an integer between 0 and 5",
+  );
 });
 
 test("unregisterHabitat deletes server registration before removing the local registration file", async () => {

@@ -13,6 +13,7 @@ import { createInventoryCommand } from "./commands/inventory";
 import { createModuleCommand } from "./commands/module";
 import { createPowerCommand } from "./commands/power";
 import { createResourceCommand } from "./commands/resource";
+import { createScanCommand } from "./commands/scan";
 import { createSolarCommand } from "./commands/solar";
 import { formatNumber, parseTickCount, printError } from "./cli-utils";
 
@@ -48,6 +49,7 @@ Examples:
   habitat inventory remove ferrite 10
   habitat inventory list
   habitat resource list
+  habitat scan --x 3 --y -2 --strength 60
   habitat module list`,
   );
 
@@ -171,6 +173,7 @@ program.addCommand(createConstructCommand());
 program.addCommand(createConstructionCommand());
 program.addCommand(createInventoryCommand());
 program.addCommand(createResourceCommand());
+program.addCommand(createScanCommand());
 program.addCommand(createSolarCommand());
 program.addCommand(createModuleCommand());
 program.addCommand(createPowerCommand());
