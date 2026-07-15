@@ -9,6 +9,10 @@ import type {
   ConstructionJobStatus,
   ConstructionStart,
   TickSummary,
+  StarterHuman,
+  EvaState,
+  CollectionResult,
+  HabitatAlert,
 } from "./habitat";
 
 export type ApiRegistration = {
@@ -46,6 +50,12 @@ export type StatusResponse = {
 };
 
 export type ModulesResponse = { modules: HabitatModule[] };
+export type HumansResponse = { humans: StarterHuman[] };
+export type HumanResponse = { human: StarterHuman };
+export type EvaResponse = { eva: EvaState };
+export type CollectionResponse = CollectionResult;
+export type AlertsResponse = { alerts: HabitatAlert[] };
+export type AlertResponse = { alert: HabitatAlert };
 export type ModuleResponse = { module: HabitatModule };
 export type ModuleDeleteResponse = { moduleId: string };
 export type InventoryResponse = { inventory: InventoryEntry[] };

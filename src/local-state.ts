@@ -31,6 +31,10 @@ function normalizeRegistration(registration: Partial<LocalRegistration>, modules
     registeredAt: registration.registeredAt ?? "",
     currentTick: typeof registration.currentTick === "number" ? registration.currentTick : 0,
     starterModules: [],
+    ...(registration.starterHumans ? { starterHumans: registration.starterHumans } : {}),
+    ...(registration.contracts ? { contracts: registration.contracts } : {}),
+    ...(registration.evaState ? { evaState: registration.evaState } : {}),
+    ...(registration.alerts ? { alerts: registration.alerts } : {}),
     blueprints: [],
     modules,
     powerSummary: normalizePowerSummary(registration.powerSummary),
@@ -49,6 +53,10 @@ function initializeDatabase(db: Database) {
       current_tick INTEGER NOT NULL,
       power_summary_json TEXT NOT NULL,
       tick_history_json TEXT NOT NULL
+      ,starter_humans_json TEXT NOT NULL DEFAULT '[]'
+      ,alert_contract_json TEXT
+      ,eva_state_json TEXT
+      ,alerts_json TEXT
     );
 
     CREATE TABLE IF NOT EXISTS modules (
@@ -65,6 +73,21 @@ function initializeDatabase(db: Database) {
       updated_at TEXT NOT NULL
     );
   `);
+
+  for (const statement of [
+    "ALTER TABLE habitat_state ADD COLUMN starter_humans_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE habitat_state ADD COLUMN alert_contract_json TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN eva_state_json TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN alerts_json TEXT",
+  ]) {
+    try {
+      db.exec(statement);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("duplicate column name")) {
+        throw error;
+      }
+    }
+  }
 }
 
 function openDatabase(path: string) {
@@ -106,6 +129,12 @@ function createSqliteLocalStateStore(cwd: string): LocalStateStore {
             displayName: String(state.display_name),
             registeredAt: String(state.registered_at),
             currentTick: Number(state.current_tick),
+            starterHumans: JSON.parse(String(state.starter_humans_json ?? "[]")),
+            contracts: state.alert_contract_json
+              ? { alerts: JSON.parse(String(state.alert_contract_json)) }
+              : undefined,
+            evaState: state.eva_state_json ? JSON.parse(String(state.eva_state_json)) : undefined,
+            alerts: state.alerts_json ? JSON.parse(String(state.alerts_json)) : undefined,
             powerSummary: JSON.parse(String(state.power_summary_json)),
             tickHistory: JSON.parse(String(state.tick_history_json)),
           },
@@ -137,14 +166,20 @@ function createSqliteLocalStateStore(cwd: string): LocalStateStore {
           db.query("DELETE FROM modules").run();
           db.query(`
             INSERT INTO habitat_state
-              (id, habitat_uuid, habitat_id, display_name, registered_at, current_tick, power_summary_json, tick_history_json)
-            VALUES (1, $habitatUuid, $habitatId, $displayName, $registeredAt, $currentTick, $powerSummary, $tickHistory)
+              (id, habitat_uuid, habitat_id, display_name, registered_at, current_tick, power_summary_json, tick_history_json, starter_humans_json, alert_contract_json, eva_state_json, alerts_json)
+            VALUES (1, $habitatUuid, $habitatId, $displayName, $registeredAt, $currentTick, $powerSummary, $tickHistory, $starterHumans, $alertContract, $evaState, $alerts)
           `).run({
             $habitatUuid: localRegistration.habitatUuid,
             $habitatId: localRegistration.habitatId,
             $displayName: localRegistration.displayName,
             $registeredAt: localRegistration.registeredAt,
             $currentTick: localRegistration.currentTick,
+            $starterHumans: JSON.stringify(localRegistration.starterHumans ?? []),
+            $alertContract: localRegistration.contracts?.alerts
+              ? JSON.stringify(localRegistration.contracts.alerts)
+              : null,
+            $evaState: localRegistration.evaState ? JSON.stringify(localRegistration.evaState) : null,
+            $alerts: localRegistration.alerts ? JSON.stringify(localRegistration.alerts) : null,
             $powerSummary: JSON.stringify(localRegistration.powerSummary),
             $tickHistory: JSON.stringify(localRegistration.tickHistory),
           });

@@ -6,6 +6,14 @@ import {
   getLocalStateStore,
   getDatabaseFilePath,
 } from "./local-state";
+import {
+  acknowledgeAlert as acknowledgeStoredAlert,
+  listAlerts as listStoredAlerts,
+  observeAlert,
+  resolveAlertCondition,
+  type HabitatAlert,
+} from "./alerts";
+export type { HabitatAlert } from "./alerts";
 export { getDatabaseFilePath } from "./local-state";
 
 type FetchLike = typeof fetch;
@@ -23,6 +31,28 @@ export type StarterModule = {
   connectedTo: string[];
   runtimeAttributes: JsonObject;
   capabilities: string[];
+};
+
+export type StarterHuman = {
+  id: string;
+  displayName: string;
+  locationModuleId: string;
+};
+
+export type AlertContract = {
+  schemaVersion: string;
+  schema: JsonObject;
+};
+
+export type RegistrationContracts = {
+  alerts: AlertContract;
+};
+
+export type EvaState = {
+  deployedHumanId: string | null;
+  position: { x: number; y: number };
+  carriedResources: Record<string, number>;
+  maxCarryCapacityKg: number;
 };
 
 export type ProductionBlueprint = {
@@ -196,10 +226,14 @@ export type LocalRegistration = {
   registeredAt: string;
   currentTick: number;
   starterModules: StarterModule[];
+  starterHumans?: StarterHuman[];
+  contracts?: RegistrationContracts;
+  evaState?: EvaState;
   blueprints: ProductionBlueprint[];
   modules: HabitatModule[];
   powerSummary: PowerSummary;
   tickHistory: TickSummary[];
+  alerts?: HabitatAlert[];
 };
 
 export type HabitatStatus = {
@@ -268,10 +302,22 @@ type RuntimeOptions = {
 };
 
 export type WorldScanOptions = RuntimeOptions & {
-  x: number;
-  y: number;
   sensorStrength: number;
   radiusTiles: number;
+};
+
+export type WorldCollection = {
+  x: number;
+  y: number;
+  resourceType: string;
+  unit: "kg";
+  collectedKg: number;
+  remainingKg: number;
+};
+
+export type CollectionResult = {
+  collection: WorldCollection;
+  eva: EvaState;
 };
 
 type RegisterOptions = RuntimeOptions & {
@@ -310,6 +356,18 @@ type KeplerConfig = {
 };
 
 const defaultProjectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const defaultEvaCapacityKg = 10;
+const minSectorCoordinate = -25;
+const maxSectorCoordinate = 24;
+
+function createDefaultEvaState(): EvaState {
+  return {
+    deployedHumanId: null,
+    position: { x: 0, y: 0 },
+    carriedResources: {},
+    maxCarryCapacityKg: defaultEvaCapacityKg,
+  };
+}
 
 async function readEnvFile(path: string) {
   try {
@@ -439,6 +497,34 @@ function hydrateStarterModules(
   }));
 }
 
+function hydrateStarterHumans(value: unknown): StarterHuman[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((human, index) => {
+    if (
+      !human ||
+      typeof human !== "object" ||
+      typeof (human as Record<string, unknown>).id !== "string" ||
+      typeof (human as Record<string, unknown>).displayName !== "string" ||
+      typeof (human as Record<string, unknown>).locationModuleId !== "string" ||
+      !(human as Record<string, unknown>).id ||
+      !(human as Record<string, unknown>).displayName ||
+      !(human as Record<string, unknown>).locationModuleId
+    ) {
+      throw new Error(`Registration starter human ${index + 1} is invalid.`);
+    }
+
+    const starterHuman = human as StarterHuman;
+    return {
+      id: starterHuman.id,
+      displayName: starterHuman.displayName,
+      locationModuleId: starterHuman.locationModuleId,
+    };
+  });
+}
+
 async function saveLocalRegistration(cwd: string, registration: LocalRegistration) {
   await getLocalStateStore(cwd).save(registration);
 }
@@ -509,8 +595,13 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
     registeredAt,
     currentTick: 0,
     starterModules,
+    starterHumans: hydrateStarterHumans(body.starterHumans),
+    contracts: body.contracts?.alerts
+      ? { alerts: body.contracts.alerts }
+      : undefined,
     blueprints: Array.isArray(body.blueprints) ? body.blueprints : [],
     modules: hydrateStarterModules(body.habitatId, starterModules, registeredAt),
+    alerts: [],
     powerSummary: {
       totalPowerDrawKw: 0,
       energyUsedKwh: 0,
@@ -542,6 +633,199 @@ async function loadRequiredRegistration(options: RuntimeOptions = {}) {
 export async function listModules(options: RuntimeOptions = {}) {
   const { registration } = await loadRequiredRegistration(options);
   return registration.modules;
+}
+
+export async function listHumans(options: RuntimeOptions = {}): Promise<StarterHuman[]> {
+  const { registration } = await loadRequiredRegistration(options);
+  return registration.starterHumans ?? [];
+}
+
+export async function listAlerts(options: RuntimeOptions = {}): Promise<HabitatAlert[]> {
+  const { registration } = await loadRequiredRegistration(options);
+  return listStoredAlerts(registration);
+}
+
+export async function acknowledgeAlert(id: string, options: RuntimeOptions = {}): Promise<HabitatAlert> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const alert = acknowledgeStoredAlert(registration, id);
+  await saveLocalRegistration(cwd, registration);
+  return alert;
+}
+
+export async function moveHuman(
+  humanId: string,
+  moduleId: string,
+  options: RuntimeOptions = {},
+): Promise<StarterHuman> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const humans = registration.starterHumans ?? [];
+  const human = humans.find((entry) => entry.id === humanId);
+
+  if (!human) {
+    throw new Error(`Human not found: ${humanId}`);
+  }
+
+  const destination = registration.modules.find((module) => module.id === moduleId);
+
+  if (!destination) {
+    throw new Error(`Module not found: ${moduleId}`);
+  }
+
+  if (human.locationModuleId !== destination.id) {
+    const crewCapacity = numericAttribute(destination.runtimeAttributes.crewCapacity);
+    const occupants = humans.filter((entry) => entry.locationModuleId === destination.id).length;
+
+    if (occupants >= crewCapacity) {
+      throw new Error(`Module ${destination.displayName} has reached crew capacity.`);
+    }
+  }
+
+  human.locationModuleId = destination.id;
+  await saveLocalRegistration(cwd, registration);
+  return human;
+}
+
+function currentEvaState(registration: LocalRegistration): EvaState {
+  return registration.evaState
+    ? cloneJson(registration.evaState)
+    : createDefaultEvaState();
+}
+
+export async function getEvaStatus(options: RuntimeOptions = {}): Promise<EvaState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const eva = currentEvaState(registration);
+  if (eva.deployedHumanId) {
+    observeAlert(registration, {
+      code: "human-deployed-outside",
+      title: "Human deployed outside habitat",
+      description: "A human is currently deployed beyond the habitat suitport.",
+      severity: "warning",
+      source: "eva",
+      subject: { type: "human", id: eva.deployedHumanId },
+    });
+    if (Object.values(eva.carriedResources).reduce((total, value) => total + value, 0) >= eva.maxCarryCapacityKg) {
+      observeAlert(registration, {
+        code: "eva-carry-capacity-reached",
+        title: "Explorer carrying capacity reached",
+        description: "The deployed explorer is carrying the maximum allowed material.",
+        severity: "warning",
+        source: "eva",
+        subject: { type: "human", id: eva.deployedHumanId },
+      });
+    }
+    registration.evaState = eva;
+    await saveLocalRegistration(cwd, registration);
+  }
+  return eva;
+}
+
+export async function deployHuman(humanId: string, options: RuntimeOptions = {}): Promise<EvaState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const state = currentEvaState(registration);
+
+  if (state.deployedHumanId) {
+    throw new Error(`Human ${state.deployedHumanId} is already deployed.`);
+  }
+
+  const human = (registration.starterHumans ?? []).find((entry) => entry.id === humanId);
+  if (!human) {
+    throw new Error(`Human not found: ${humanId}`);
+  }
+
+  const suitport = registration.modules.find((module) =>
+    (module.capabilities.includes("limited-eva") || module.moduleType === "basic-suitport") &&
+    isOnlineStatus(module.runtimeAttributes.status),
+  );
+
+  if (!suitport || human.locationModuleId !== suitport.id) {
+    throw new Error("Human must occupy an active suitport before deployment.");
+  }
+
+  state.deployedHumanId = human.id;
+  state.position = { x: 0, y: 0 };
+  state.carriedResources = {};
+  registration.evaState = state;
+  observeAlert(registration, {
+    code: "human-deployed-outside",
+    title: "Human deployed outside habitat",
+    description: "A human is currently deployed beyond the habitat suitport.",
+    severity: "warning",
+    source: "eva",
+    subject: { type: "human", id: human.id },
+  });
+  await saveLocalRegistration(cwd, registration);
+  return state;
+}
+
+export async function moveExplorer(x: number, y: number, options: RuntimeOptions = {}): Promise<EvaState> {
+  if (!Number.isInteger(x) || !Number.isInteger(y)) {
+    throw new Error("Explorer position must use integer coordinates.");
+  }
+
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const state = currentEvaState(registration);
+  if (!state.deployedHumanId) {
+    throw new Error("No human is currently deployed.");
+  }
+
+  const distance = Math.abs(x - state.position.x) + Math.abs(y - state.position.y);
+  if (distance !== 1) {
+    throw new Error("Explorer movement must be exactly one adjacent grid tile.");
+  }
+
+  if (x < minSectorCoordinate || x > maxSectorCoordinate || y < minSectorCoordinate || y > maxSectorCoordinate) {
+    throw new Error("Explorer destination is outside the current Kepler sector.");
+  }
+
+  state.position = { x, y };
+  registration.evaState = state;
+  await saveLocalRegistration(cwd, registration);
+  return state;
+}
+
+export async function dockExplorer(options: RuntimeOptions = {}): Promise<EvaState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const state = currentEvaState(registration);
+  if (!state.deployedHumanId) {
+    throw new Error("No human is currently deployed.");
+  }
+
+  if (state.position.x !== 0 || state.position.y !== 0) {
+    throw new Error("Explorer can only dock at (0, 0).");
+  }
+
+  const human = (registration.starterHumans ?? []).find((entry) => entry.id === state.deployedHumanId);
+  if (!human) {
+    throw new Error(`Deployed human not found: ${state.deployedHumanId}`);
+  }
+  const suitport = registration.modules.find((module) =>
+    module.capabilities.includes("limited-eva") || module.moduleType === "basic-suitport",
+  );
+  if (!suitport) {
+    throw new Error("No suitport module is available for docking.");
+  }
+  const storageModule = registration.modules.find((module) => isStorageModule(module));
+  if (Object.keys(state.carriedResources).length > 0 && !storageModule) {
+    throw new Error("No storage module is available to unload carried resources.");
+  }
+
+  if (storageModule) {
+    const storedResources = parseStoredResources(storageModule);
+    for (const [resource, quantity] of Object.entries(state.carriedResources)) {
+      storedResources[resource] = numericAttribute(storedResources[resource]) + quantity;
+    }
+    storageModule.runtimeAttributes.storedResources = storedResources;
+  }
+
+  state.deployedHumanId = null;
+  state.carriedResources = {};
+  human.locationModuleId = suitport.id;
+  state.position = { x: 0, y: 0 };
+  resolveAlertCondition(registration, "human-deployed-outside", { type: "human", id: human.id });
+  resolveAlertCondition(registration, "eva-carry-capacity-reached", { type: "human", id: human.id });
+  registration.evaState = state;
+  await saveLocalRegistration(cwd, registration);
+  return state;
 }
 
 export async function listBlueprintCatalog(options: RuntimeOptions = {}): Promise<BlueprintCatalogResponse> {
@@ -591,12 +875,6 @@ export async function listResourceCatalog(options: RuntimeOptions = {}): Promise
 }
 
 export async function scanHabitat(options: WorldScanOptions): Promise<WorldScanResponse> {
-  if (!Number.isInteger(options.x)) {
-    throw new Error("scan x must be an integer");
-  }
-  if (!Number.isInteger(options.y)) {
-    throw new Error("scan y must be an integer");
-  }
   if (!Number.isInteger(options.sensorStrength) || options.sensorStrength < 0 || options.sensorStrength > 100) {
     throw new Error("sensor strength must be an integer between 0 and 100");
   }
@@ -606,11 +884,15 @@ export async function scanHabitat(options: WorldScanOptions): Promise<WorldScanR
 
   const cwd = await resolveProjectRoot(options.cwd ?? process.cwd(), options.projectRoot);
   const { registration } = await loadRequiredRegistration({ cwd, projectRoot: options.projectRoot });
+  const eva = currentEvaState(registration);
+  if (!eva.deployedHumanId) {
+    throw new Error("No human is currently deployed. Deploy a human before scanning.");
+  }
   const config = await loadConfig(cwd);
   const query = new URLSearchParams({
     habitatId: registration.habitatId,
-    x: String(options.x),
-    y: String(options.y),
+    x: String(eva.position.x),
+    y: String(eva.position.y),
     sensorStrength: String(options.sensorStrength),
     radiusTiles: String(options.radiusTiles),
   });
@@ -621,6 +903,76 @@ export async function scanHabitat(options: WorldScanOptions): Promise<WorldScanR
 
   await assertOk(response, "World scan request");
   return (await parseJsonResponse(response)) as WorldScanResponse;
+}
+
+export async function collectResource(quantityKg: number, options: RuntimeOptions = {}): Promise<CollectionResult> {
+  if (!Number.isInteger(quantityKg) || quantityKg <= 0) {
+    throw new Error("Collection quantity must be a positive whole number.");
+  }
+
+  const cwd = await resolveProjectRoot(options.cwd ?? process.cwd(), options.projectRoot);
+  const { registration } = await loadRequiredRegistration({ cwd, projectRoot: options.projectRoot });
+  const eva = currentEvaState(registration);
+  if (!eva.deployedHumanId) {
+    throw new Error("No human is currently deployed. Deploy a human before collecting.");
+  }
+
+  const carriedKg = Object.values(eva.carriedResources).reduce((total, quantity) => total + quantity, 0);
+  if (carriedKg + quantityKg > eva.maxCarryCapacityKg) {
+    throw new Error(`Carrying capacity exceeded: only ${eva.maxCarryCapacityKg - carriedKg} kg remains.`);
+  }
+
+  const config = await loadConfig(cwd);
+  let body: { collection: WorldCollection };
+  try {
+    const response = await (options.fetchImpl ?? fetch)(`${config.baseUrl}/world/collect`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        habitatId: registration.habitatId,
+        x: eva.position.x,
+        y: eva.position.y,
+        quantityKg,
+      }),
+    });
+    await assertOk(response, "World collection request");
+    body = await parseJsonResponse(response) as { collection: WorldCollection };
+  } catch (error) {
+    observeAlert(registration, {
+      code: "collection-failed",
+      title: "Material collection failed",
+      description: error instanceof Error ? error.message : "Kepler rejected the material collection attempt.",
+      severity: "warning",
+      source: "collection",
+      subject: { type: "human", id: eva.deployedHumanId },
+    });
+    await saveLocalRegistration(cwd, registration);
+    throw error;
+  }
+  const collection = body.collection;
+  if (!collection || typeof collection.resourceType !== "string" || collection.collectedKg !== quantityKg) {
+    throw new Error("Kepler returned an invalid collection response.");
+  }
+
+  eva.carriedResources[collection.resourceType] =
+    (eva.carriedResources[collection.resourceType] ?? 0) + collection.collectedKg;
+  resolveAlertCondition(registration, "collection-failed", { type: "human", id: eva.deployedHumanId });
+  if (Object.values(eva.carriedResources).reduce((total, value) => total + value, 0) >= eva.maxCarryCapacityKg) {
+    observeAlert(registration, {
+      code: "eva-carry-capacity-reached",
+      title: "Explorer carrying capacity reached",
+      description: "The deployed explorer is carrying the maximum allowed material.",
+      severity: "warning",
+      source: "eva",
+      subject: { type: "human", id: eva.deployedHumanId },
+    });
+  }
+  registration.evaState = eva;
+  await saveLocalRegistration(cwd, registration);
+  return { collection, eva };
 }
 
 export async function showBlueprint(id: string, options: RuntimeOptions = {}) {
@@ -799,7 +1151,7 @@ function numericRecord(value: unknown) {
 function inventoryFromStorage(modules: HabitatModule[]) {
   const inventory: Record<string, number> = {};
 
-  for (const module of modules.filter((entry) => isStorageModule(entry) && isOnlineStatus(entry.runtimeAttributes.status))) {
+  for (const module of modules.filter((entry) => isStorageModule(entry))) {
     for (const [resource, quantity] of Object.entries(numericRecord(module.runtimeAttributes.storedResources))) {
       inventory[resource] = (inventory[resource] ?? 0) + quantity;
     }
@@ -1403,6 +1755,12 @@ export async function setModuleStatus(
 
 export async function deleteModule(id: string, options: RuntimeOptions = {}) {
   const { cwd, registration } = await loadRequiredRegistration(options);
+  const occupant = (registration.starterHumans ?? []).find((human) => human.locationModuleId === id);
+
+  if (occupant) {
+    throw new Error(`Cannot delete module ${id}: occupied by human ${occupant.id}.`);
+  }
+
   const nextModules = registration.modules.filter((entry) => entry.id !== id);
 
   if (nextModules.length === registration.modules.length) {

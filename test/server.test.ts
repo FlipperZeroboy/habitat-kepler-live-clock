@@ -118,6 +118,71 @@ test("GET /status combines remote registration status with local state summary",
   });
 });
 
+test("GET /humans returns starter humans from local registration state", async () => {
+  const app = createApp({
+    listHumans: async () => [
+      { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+      { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+    ],
+  });
+
+  const response = await app.request("/humans");
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    humans: [
+      { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+      { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+    ],
+  });
+});
+
+test("PUT /humans/:id/location moves a human through the local API", async () => {
+  const app = createApp({
+    moveHuman: async (humanId: string, moduleId: string) => ({ id: humanId, displayName: "Abigail", locationModuleId: moduleId }),
+  });
+
+  const response = await app.request("/humans/human-1/location", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ moduleId: "module-2" }),
+  });
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    human: { id: "human-1", displayName: "Abigail", locationModuleId: "module-2" },
+  });
+});
+
+test("EVA routes expose persisted deployment and movement state", async () => {
+  const app = createApp({
+    getEvaStatus: async () => ({ deployedHumanId: "human-1", position: { x: 0, y: 0 }, carriedResources: {}, maxCarryCapacityKg: 10 }),
+    deployHuman: async (humanId: string) => ({ deployedHumanId: humanId, position: { x: 0, y: 0 }, carriedResources: {}, maxCarryCapacityKg: 10 }),
+    moveExplorer: async (x: number, y: number) => ({ deployedHumanId: "human-1", position: { x, y }, carriedResources: {}, maxCarryCapacityKg: 10 }),
+    dockExplorer: async () => ({ deployedHumanId: null, position: { x: 0, y: 0 }, carriedResources: {}, maxCarryCapacityKg: 10 }),
+  });
+
+  expect(await (await app.request("/eva")).json()).toEqual({ eva: { deployedHumanId: "human-1", position: { x: 0, y: 0 }, carriedResources: {}, maxCarryCapacityKg: 10 } });
+  expect((await app.request("/eva/deploy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ humanId: "human-1" }) })).status).toBe(200);
+  expect(await (await app.request("/eva/move", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ x: 1, y: 0 }) })).json()).toEqual({ eva: { deployedHumanId: "human-1", position: { x: 1, y: 0 }, carriedResources: {}, maxCarryCapacityKg: 10 } });
+  expect((await app.request("/eva/dock", { method: "POST" })).status).toBe(200);
+});
+
+test("alert routes list and acknowledge persisted alerts", async () => {
+  const alert = {
+    id: "alert-1", code: "human-deployed-outside", title: "Human deployed outside habitat",
+    description: "A human is outside.", severity: "warning", status: "open", source: "eva",
+    openedAt: "2026-07-15T00:00:00.000Z", lastObservedAt: "2026-07-15T00:00:00.000Z", occurrenceCount: 1,
+  } as const;
+  const app = createApp({
+    listAlerts: async () => [alert],
+    acknowledgeAlert: async (id: string) => ({ ...alert, id, status: "acknowledged", acknowledgedAt: "2026-07-15T00:01:00.000Z" }),
+  });
+
+  expect(await (await app.request("/alerts")).json()).toEqual({ alerts: [alert] });
+  expect(await (await app.request("/alerts/alert-1/acknowledge", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()).toMatchObject({ alert: { id: "alert-1", status: "acknowledged" } });
+});
+
 test("DELETE /registration unregisters through the backend", async () => {
   let called = false;
   const app = createApp({
@@ -167,26 +232,35 @@ test("scan route maps validated query parameters and preserves the Kepler respon
       requested = options;
       return scan;
     },
+    getEvaStatus: async () => ({ deployedHumanId: "human-1", position: { x: 3, y: -2 }, carriedResources: {}, maxCarryCapacityKg: 10 }),
   });
 
-  const response = await app.request("/scan?x=3&y=-2&strength=60");
+  const response = await app.request("/scan?strength=60");
 
   expect(response.status).toBe(200);
-  expect(requested).toEqual({ x: 3, y: -2, sensorStrength: 60, radiusTiles: 0 });
+  expect(requested).toEqual({ sensorStrength: 60, radiusTiles: 0 });
   expect(await response.json()).toEqual(scan);
 });
 
 test("scan route rejects invalid query parameters with structured errors", async () => {
   const app = createApp({ scanHabitat: async () => ({ scan: {} }) });
   for (const [query, message] of [
-    ["y=0&strength=60", "scan x must be an integer"],
-    ["x=3&y=-2&strength=101", "sensor strength must be an integer between 0 and 100"],
-    ["x=3&y=-2&strength=60&radius=6", "scan radius must be an integer between 0 and 5"],
+    ["strength=101", "sensor strength must be an integer between 0 and 100"],
+    ["strength=60&radius=6", "scan radius must be an integer between 0 and 5"],
   ]) {
     const response = await app.request(`/scan?${query}`);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { message } });
   }
+});
+
+test("POST /collect delegates to local collection logic", async () => {
+  const app = createApp({
+    collectResource: async (quantityKg: number) => ({ collection: { x: 1, y: 0, resourceType: "ferrite", unit: "kg", collectedKg: quantityKg, remainingKg: 10 }, eva: { deployedHumanId: "human-1", position: { x: 1, y: 0 }, carriedResources: { ferrite: quantityKg }, maxCarryCapacityKg: 10 } }),
+  });
+  const response = await app.request("/collect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ quantityKg: 1 }) });
+  expect(response.status).toBe(200);
+  expect((await response.json()).collection.resourceType).toBe("ferrite");
 });
 
 test("backend errors are returned as structured JSON", async () => {

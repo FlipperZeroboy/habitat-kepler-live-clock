@@ -12,6 +12,7 @@ import {
   cancelConstructionJob,
   listInventory,
   listConstructionJobs,
+  listHumans,
   listModules,
   removeInventoryResource,
   showModule,
@@ -115,6 +116,10 @@ beforeEach(async () => {
         registeredAt: "2026-07-06T12:00:00.000Z",
         currentTick: 0,
         starterModules: [],
+        starterHumans: [
+          { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+          { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+        ],
         blueprints: [],
         modules: [
           {
@@ -152,6 +157,7 @@ beforeEach(async () => {
   );
   previousApiBaseUrl = process.env.HABITAT_API_BASE_URL;
   const backendApp = createApp({
+    listHumans: () => listHumans({ cwd: tempDir }),
     listModules: () => listModules({ cwd: tempDir }),
     showModule: (id) => showModule(id, { cwd: tempDir }),
     createModule: (input) => createModule(input, { cwd: tempDir }),
@@ -165,16 +171,16 @@ beforeEach(async () => {
     startConstruction: (blueprintId) => startConstruction(blueprintId, { cwd: tempDir }),
     listConstructionJobs: () => listConstructionJobs({ cwd: tempDir }),
     cancelConstructionJob: (facilityId) => cancelConstructionJob(facilityId, { cwd: tempDir }),
-    scanHabitat: async ({ x, y, sensorStrength, radiusTiles }) => ({
+    scanHabitat: async ({ sensorStrength, radiusTiles }) => ({
       scan: {
         modelVersion: "resource-probability-v2",
-        origin: { x, y },
+        origin: { x: 3, y: -2 },
         sensorStrength,
         radiusTiles,
         tiles: radiusTiles === 0
           ? [{
-              x,
-              y,
+              x: 3,
+              y: -2,
               terrain: "flat",
               distanceTiles: 0,
               probabilities: [
@@ -193,8 +199,8 @@ beforeEach(async () => {
               },
             }]
           : [{
-              x: x + 1,
-              y,
+              x: 4,
+              y: -2,
               terrain: "flat",
               distanceTiles: 1,
               probabilities: [
@@ -217,6 +223,47 @@ beforeEach(async () => {
   });
   backendServer = Bun.serve({ port: 0, fetch: backendApp.fetch });
   process.env.HABITAT_API_BASE_URL = `http://127.0.0.1:${backendServer.port}`;
+});
+
+test("human list prints starter humans and their assigned modules", async () => {
+  const command = ["bun", "run", "src/index.ts", "human", "list"];
+  const spawnOptions = {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  } as const;
+  const proc = Bun.spawn(command, spawnOptions);
+
+  const output = await new Response(proc.stdout).text();
+  const errorOutput = await new Response(proc.stderr).text();
+  expect(await proc.exited).toBe(0);
+  expect(errorOutput).toBe("");
+  expect(output).toContain("human-1 | Abigail | module-1");
+  expect(output).toContain("human-2 | Adam | module-1");
+
+  const repeatedProc = Bun.spawn(command, spawnOptions);
+  const repeatedOutput = await new Response(repeatedProc.stdout).text();
+  expect(await repeatedProc.exited).toBe(0);
+  expect(repeatedOutput).toBe(output);
+});
+
+test("human list --json prints the persisted humans as JSON", async () => {
+  const proc = Bun.spawn(["bun", "run", "src/index.ts", "human", "list", "--json"], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
+  });
+
+  const output = await new Response(proc.stdout).text();
+  expect(await proc.exited).toBe(0);
+  expect(JSON.parse(output)).toEqual({
+    humans: [
+      { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+      { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+    ],
+  });
 });
 
 async function writeTickRegistration() {
@@ -1507,7 +1554,7 @@ test("solar status prints the current Kepler irradiance in beginner-friendly lan
 
 test("scan defaults radius to zero and prints terrain, none, probabilities, and exact quantity", async () => {
   const proc = Bun.spawn([
-    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "100",
+    "bun", "run", "src/index.ts", "scan", "--strength", "100",
   ], {
     cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
   });
@@ -1530,7 +1577,7 @@ test("scan defaults radius to zero and prints terrain, none, probabilities, and 
 
 test("scan summarizes a radius, preserves JSON, and validates CLI options", async () => {
   const humanProc = Bun.spawn([
-    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "1",
+    "bun", "run", "src/index.ts", "scan", "--strength", "60", "--radius", "1",
   ], {
     cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
   });
@@ -1541,7 +1588,7 @@ test("scan summarizes a radius, preserves JSON, and validates CLI options", asyn
   expect(humanOutput).toContain("Quantity: 60-120 kg (estimated; about 90 kg)");
 
   const jsonProc = Bun.spawn([
-    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "1", "--json",
+    "bun", "run", "src/index.ts", "scan", "--strength", "60", "--radius", "1", "--json",
   ], {
     cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
   });
@@ -1552,7 +1599,7 @@ test("scan summarizes a radius, preserves JSON, and validates CLI options", asyn
   });
 
   const invalidProc = Bun.spawn([
-    "bun", "run", "src/index.ts", "scan", "--x", "3", "--y", "-2", "--strength", "101",
+    "bun", "run", "src/index.ts", "scan", "--strength", "101",
   ], {
     cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, HABITAT_PROJECT_ROOT: tempDir },
   });

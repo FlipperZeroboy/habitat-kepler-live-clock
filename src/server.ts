@@ -10,6 +10,15 @@ import {
   listBlueprintCatalog,
   listInventory,
   listModules,
+  listHumans,
+  moveHuman,
+  getEvaStatus,
+  deployHuman,
+  moveExplorer,
+  dockExplorer,
+  collectResource,
+  listAlerts,
+  acknowledgeAlert,
   listResourceCatalog,
   loadLocalRegistration,
   registerHabitat,
@@ -25,6 +34,10 @@ import {
   listConstructionJobs,
   type HabitatStatus,
   type HabitatModule,
+  type StarterHuman,
+  type EvaState,
+  type CollectionResult,
+  type HabitatAlert,
   type ConstructionCancelResult,
   type ConstructionDryRun,
   type ConstructionJobStatus,
@@ -66,6 +79,15 @@ type AppOptions = {
   listResourceCatalog?: () => Promise<{ catalogVersion: string; resources: IndustryResource[] }>;
   getSolarIrradiance?: typeof getSolarIrradiance;
   listModules?: () => Promise<HabitatModule[]>;
+  listHumans?: () => Promise<StarterHuman[]>;
+  moveHuman?: (humanId: string, moduleId: string) => Promise<StarterHuman>;
+  getEvaStatus?: () => Promise<EvaState>;
+  deployHuman?: (humanId: string) => Promise<EvaState>;
+  moveExplorer?: (x: number, y: number) => Promise<EvaState>;
+  dockExplorer?: () => Promise<EvaState>;
+  collectResource?: (quantityKg: number) => Promise<CollectionResult>;
+  listAlerts?: () => Promise<HabitatAlert[]>;
+  acknowledgeAlert?: (id: string) => Promise<HabitatAlert>;
   showModule?: (id: string) => Promise<HabitatModule>;
   createModule?: (input: { blueprintId: string; name?: string }) => Promise<HabitatModule>;
   updateModule?: (id: string, input: { name?: string; status?: string; health?: number }) => Promise<HabitatModule>;
@@ -134,6 +156,15 @@ export function createApp(options: AppOptions = {}) {
   const getResourceCatalog = options.listResourceCatalog ?? (() => listResourceCatalog({ fetchImpl: keplerFetch }));
   const getSolar = options.getSolarIrradiance ?? (() => getSolarIrradiance({ fetchImpl: keplerFetch }));
   const getModules = options.listModules ?? listModules;
+  const getHumans = options.listHumans ?? listHumans;
+  const moveLocalHuman = options.moveHuman ?? moveHuman;
+  const getLocalEvaStatus = options.getEvaStatus ?? getEvaStatus;
+  const deployLocalHuman = options.deployHuman ?? deployHuman;
+  const moveLocalExplorer = options.moveExplorer ?? moveExplorer;
+  const dockLocalExplorer = options.dockExplorer ?? dockExplorer;
+  const collectLocalResource = options.collectResource ?? collectResource;
+  const getAlerts = options.listAlerts ?? listAlerts;
+  const acknowledgeLocalAlert = options.acknowledgeAlert ?? acknowledgeAlert;
   const getModule = options.showModule ?? showModule;
   const createLocalModule = options.createModule ?? ((input) => createModule(input, { fetchImpl: keplerFetch }));
   const updateLocalModule = options.updateModule ?? updateModule;
@@ -229,8 +260,6 @@ export function createApp(options: AppOptions = {}) {
   });
   app.get("/scan", async (context) => {
     const query = new URL(context.req.url).searchParams;
-    const x = parseIntegerQuery(query.get("x"), "scan x must be an integer");
-    const y = parseIntegerQuery(query.get("y"), "scan y must be an integer");
     const sensorStrength = parseBoundedIntegerQuery(
       query.get("strength"), 0, 100, "sensor strength must be an integer between 0 and 100",
     );
@@ -238,13 +267,56 @@ export function createApp(options: AppOptions = {}) {
       query.get("radius") ?? "0", 0, 5, "scan radius must be an integer between 0 and 5",
     );
     context.set("logSummary", "proxied to Kepler");
-    return context.json(await scan({ x, y, sensorStrength, radiusTiles }));
+    return context.json(await scan({ sensorStrength, radiusTiles }));
   });
 
   app.get("/modules", async (context) => {
     const modules = await getModules();
     context.set("logSummary", `${modules.length} modules`);
     return context.json({ modules });
+  });
+
+  app.get("/humans", async (context) => {
+    const humans = await getHumans();
+    context.set("logSummary", `${humans.length} humans`);
+    return context.json({ humans });
+  });
+  app.put("/humans/:id/location", async (context) => {
+    const body = await readJsonBody(context);
+
+    if (typeof body.moduleId !== "string" || !body.moduleId.trim()) {
+      return context.json({ error: { message: "Human destination moduleId is required." } }, 400);
+    }
+
+    const human = await moveLocalHuman(context.req.param("id"), body.moduleId);
+    return context.json({ human });
+  });
+  app.get("/eva", async (context) => context.json({ eva: await getLocalEvaStatus() }));
+  app.post("/eva/deploy", async (context) => {
+    const body = await readJsonBody(context);
+    if (typeof body.humanId !== "string" || !body.humanId.trim()) {
+      return context.json({ error: { message: "EVA humanId is required." } }, 400);
+    }
+    return context.json({ eva: await deployLocalHuman(body.humanId) });
+  });
+  app.post("/eva/move", async (context) => {
+    const body = await readJsonBody(context);
+    if (typeof body.x !== "number" || typeof body.y !== "number") {
+      return context.json({ error: { message: "EVA move requires numeric x and y coordinates." } }, 400);
+    }
+    return context.json({ eva: await moveLocalExplorer(body.x, body.y) });
+  });
+  app.post("/eva/dock", async (context) => context.json({ eva: await dockLocalExplorer() }));
+  app.post("/collect", async (context) => {
+    const body = await readJsonBody(context);
+    if (typeof body.quantityKg !== "number") {
+      return context.json({ error: { message: "Collection quantityKg is required." } }, 400);
+    }
+    return context.json(await collectLocalResource(body.quantityKg));
+  });
+  app.get("/alerts", async (context) => context.json({ alerts: await getAlerts() }));
+  app.post("/alerts/:id/acknowledge", async (context) => {
+    return context.json({ alert: await acknowledgeLocalAlert(context.req.param("id")) });
   });
   app.get("/modules/:id", async (context) => {
     return context.json({ module: await getModule(context.req.param("id")) });

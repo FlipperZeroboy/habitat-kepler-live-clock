@@ -10,6 +10,10 @@ import { createBlueprintCommand } from "./commands/blueprint";
 import { createConstructCommand } from "./commands/construct";
 import { createConstructionCommand } from "./commands/construction";
 import { createInventoryCommand } from "./commands/inventory";
+import { createHumanCommand } from "./commands/human";
+import { createEvaCommand } from "./commands/eva";
+import { createCollectCommand } from "./commands/collect";
+import { createAlertCommand } from "./commands/alert";
 import { createModuleCommand } from "./commands/module";
 import { createPowerCommand } from "./commands/power";
 import { createResourceCommand } from "./commands/resource";
@@ -50,6 +54,10 @@ Examples:
   habitat inventory list
   habitat resource list
   habitat scan --x 3 --y -2 --strength 60
+  habitat human list
+  habitat eva status
+  habitat collect <quantity-kg>
+  habitat alert list
   habitat module list`,
   );
 
@@ -172,6 +180,10 @@ program.addCommand(createBlueprintCommand());
 program.addCommand(createConstructCommand());
 program.addCommand(createConstructionCommand());
 program.addCommand(createInventoryCommand());
+program.addCommand(createHumanCommand());
+program.addCommand(createEvaCommand());
+program.addCommand(createCollectCommand());
+program.addCommand(createAlertCommand());
 program.addCommand(createResourceCommand());
 program.addCommand(createScanCommand());
 program.addCommand(createSolarCommand());

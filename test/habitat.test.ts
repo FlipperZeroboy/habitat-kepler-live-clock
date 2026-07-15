@@ -4,18 +4,26 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   addInventoryResource,
+  acknowledgeAlert,
   cancelConstructionJob,
   checkLocalConfig,
+  collectResource,
   createModule,
   deleteModule,
+  deployHuman,
+  dockExplorer,
+  getEvaStatus,
   listBlueprintCatalog,
   listResourceCatalog,
+  moveExplorer,
   dryRunConstruction,
   getLocalStatusSummary,
   getDatabaseFilePath,
   getRegistrationStatus,
   getSolarIrradiance,
   listInventory,
+  listAlerts,
+  moveHuman,
   listConstructionJobs,
   listModules,
   loadLocalRegistration,
@@ -100,6 +108,7 @@ test("local state store saves and loads local state in sqlite, then deletes the 
     registeredAt: "2026-07-06T12:00:00.000Z",
     currentTick: 0,
     starterModules: [],
+    starterHumans: [],
     blueprints: [],
     modules: [
       {
@@ -332,6 +341,27 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     return new Response(
       JSON.stringify({
         habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        contracts: {
+          alerts: {
+            schemaVersion: "1.0",
+            schema: {
+              title: "Habitat Alert",
+              required: ["id", "code", "severity"],
+            },
+          },
+        },
+        starterHumans: [
+          {
+            id: "human-1",
+            displayName: "Abigail",
+            locationModuleId: "module-1",
+          },
+          {
+            id: "human-2",
+            displayName: "Adam",
+            locationModuleId: "module-1",
+          },
+        ],
         starterModules: [
           {
             id: "module-1",
@@ -389,6 +419,23 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     displayName: "Artemis Ridge",
     registeredAt: "2026-07-06T12:00:00.000Z",
     currentTick: 0,
+    starterHumans: [
+      { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+      { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+    ],
+    contracts: {
+      alerts: {
+        schemaVersion: "1.0",
+        schema: {
+          title: "Habitat Alert",
+          required: ["id", "code", "severity"],
+        },
+      },
+    },
+  });
+  await expect(loadLocalRegistration(tempDir)).resolves.toMatchObject({
+    starterHumans: registration.starterHumans,
+    contracts: registration.contracts,
   });
   expect(registration.modules).toEqual([
     {
@@ -425,6 +472,176 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     starterModules: [],
     blueprints: [],
   });
+});
+
+test("registration persists every starter module and human in one local state", async () => {
+  const starterModules = Array.from({ length: 6 }, (_, index) => ({
+    id: `module-${index + 1}`,
+    blueprintId: `module-type-${index + 1}`,
+    displayName: `Module ${index + 1}`,
+    connectedTo: [],
+    runtimeAttributes: { health: 100, status: "online" },
+    capabilities: [`capability-${index + 1}`],
+  }));
+  const starterHumans = [
+    { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
+    { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
+  ];
+
+  await registerHabitat("Artemis Ridge", {
+    cwd: tempDir,
+    fetchImpl: async () => new Response(JSON.stringify({
+      habitatId: "habitat-1",
+      starterModules,
+      starterHumans,
+      blueprints: [],
+    }), { status: 201 }),
+    randomUuid: () => "11111111-1111-4111-8111-111111111111",
+    now: () => new Date("2026-07-06T12:00:00.000Z"),
+  });
+
+  const registration = await loadLocalRegistration(tempDir);
+  expect(registration?.modules).toHaveLength(6);
+  expect(registration?.starterHumans).toEqual(starterHumans);
+  expect(registration?.starterHumans?.every((human) =>
+    registration.modules.some((module) => module.id === human.locationModuleId),
+  )).toBe(true);
+});
+
+test("invalid starter humans leave no partially persisted registration", async () => {
+  await expect(registerHabitat("Artemis Ridge", {
+    cwd: tempDir,
+    fetchImpl: async () => new Response(JSON.stringify({
+      habitatId: "habitat-1",
+      starterModules: [{
+        id: "module-1",
+        blueprintId: "command-module",
+        displayName: "Command Module",
+        connectedTo: [],
+        runtimeAttributes: {},
+        capabilities: [],
+      }],
+      starterHumans: [{ id: "human-1", displayName: "", locationModuleId: "module-1" }],
+      blueprints: [],
+    }), { status: 201 }),
+    randomUuid: () => "11111111-1111-4111-8111-111111111111",
+  })).rejects.toThrow("Registration starter human 1 is invalid.");
+
+  await expect(loadLocalRegistration(tempDir)).resolves.toBeNull();
+});
+
+test("human movement uses destination crew capacity and persists the new module", async () => {
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat-1",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 0,
+    starterModules: [],
+    starterHumans: [
+      { id: "human-1", displayName: "Abigail", locationModuleId: "command-1" },
+      { id: "human-2", displayName: "Adam", locationModuleId: "command-1" },
+    ],
+    blueprints: [],
+    modules: [
+      {
+        id: "command-1", habitatId: "habitat-1", blueprintId: "command-module", moduleType: "command-module",
+        displayName: "Command Module", connectedTo: [], runtimeAttributes: { crewCapacity: 2, status: "active" },
+        capabilities: [], source: "kepler-registration", createdAt: "", updatedAt: "",
+      },
+      {
+        id: "lab-1", habitatId: "habitat-1", blueprintId: "lab", moduleType: "lab",
+        displayName: "Lab", connectedTo: [], runtimeAttributes: { crewCapacity: 1, status: "offline" },
+        capabilities: [], source: "kepler-registration", createdAt: "", updatedAt: "",
+      },
+    ],
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 },
+    tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(registration);
+
+  await expect(moveHuman("human-1", "lab-1", { cwd: tempDir })).resolves.toEqual({
+    id: "human-1", displayName: "Abigail", locationModuleId: "lab-1",
+  });
+  await expect(moveHuman("human-2", "lab-1", { cwd: tempDir })).rejects.toThrow("crew capacity");
+  await expect(moveHuman("human-2", "missing", { cwd: tempDir })).rejects.toThrow("Module not found: missing");
+  await expect(loadLocalRegistration(tempDir)).resolves.toMatchObject({
+    starterHumans: [
+      { id: "human-1", locationModuleId: "lab-1" },
+      { id: "human-2", locationModuleId: "command-1" },
+    ],
+  });
+});
+
+test("deleteModule rejects an occupied module", async () => {
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [],
+    starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "module-1" }], blueprints: [],
+    modules: [{ id: "module-1", habitatId: "habitat-1", blueprintId: "command-module", moduleType: "command-module", displayName: "Command Module", connectedTo: [], runtimeAttributes: {}, capabilities: [], source: "kepler-registration", createdAt: "", updatedAt: "" }],
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(registration);
+
+  await expect(deleteModule("module-1", { cwd: tempDir })).rejects.toThrow("occupied by human human-1");
+  await expect(loadLocalRegistration(tempDir)).resolves.toMatchObject({ modules: [{ id: "module-1" }] });
+});
+
+test("EVA deploys from the suitport and persists one-tile cardinal moves", async () => {
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [],
+    starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "suitport-1" }], blueprints: [],
+    modules: [{ id: "suitport-1", habitatId: "habitat-1", blueprintId: "basic-suitport", moduleType: "basic-suitport", displayName: "Basic Suitport", connectedTo: [], runtimeAttributes: { status: "online" }, capabilities: ["limited-eva", "suitport-access"], source: "kepler-registration", createdAt: "", updatedAt: "" }],
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(registration);
+
+  await expect(deployHuman("human-1", { cwd: tempDir })).resolves.toMatchObject({ deployedHumanId: "human-1", position: { x: 0, y: 0 } });
+  await expect(moveExplorer(1, 0, { cwd: tempDir })).resolves.toMatchObject({ position: { x: 1, y: 0 } });
+  await expect(moveExplorer(2, 1, { cwd: tempDir })).rejects.toThrow("one adjacent grid tile");
+  await expect(moveExplorer(5, 0, { cwd: tempDir })).rejects.toThrow("one adjacent grid tile");
+  await expect(dockExplorer({ cwd: tempDir })).rejects.toThrow("(0, 0)");
+  await expect(getEvaStatus({ cwd: tempDir })).resolves.toMatchObject({ deployedHumanId: "human-1", position: { x: 1, y: 0 } });
+  await expect(moveExplorer(0, 0, { cwd: tempDir })).resolves.toMatchObject({ position: { x: 0, y: 0 } });
+  await expect(dockExplorer({ cwd: tempDir })).resolves.toMatchObject({ deployedHumanId: null, position: { x: 0, y: 0 } });
+});
+
+test("EVA deployment requires the human to occupy an available suitport", async () => {
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [],
+    starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "command-1" }], blueprints: [],
+    modules: [{ id: "suitport-1", habitatId: "habitat-1", blueprintId: "basic-suitport", moduleType: "basic-suitport", displayName: "Basic Suitport", connectedTo: [], runtimeAttributes: { status: "online" }, capabilities: ["limited-eva"], source: "kepler-registration", createdAt: "", updatedAt: "" }, { id: "command-1", habitatId: "habitat-1", blueprintId: "command-module", moduleType: "command-module", displayName: "Command Module", connectedTo: [], runtimeAttributes: { status: "active" }, capabilities: [], source: "kepler-registration", createdAt: "", updatedAt: "" }],
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(registration);
+
+  await expect(deployHuman("human-1", { cwd: tempDir })).rejects.toThrow("active suitport");
+});
+
+test("alerts deduplicate, acknowledge, persist, and resolve EVA conditions", async () => {
+  const registration = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [],
+    starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "suitport-1" }], blueprints: [],
+    modules: [{ id: "suitport-1", habitatId: "habitat-1", blueprintId: "basic-suitport", moduleType: "basic-suitport", displayName: "Basic Suitport", connectedTo: [], runtimeAttributes: { status: "online" }, capabilities: ["limited-eva"], source: "kepler-registration", createdAt: "", updatedAt: "" }],
+    contracts: { alerts: { schemaVersion: "1.0", schema: { required: ["id", "code", "title", "description", "severity", "status", "source", "openedAt", "lastObservedAt", "occurrenceCount"] } } },
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(registration);
+
+  await deployHuman("human-1", { cwd: tempDir });
+  await getEvaStatus({ cwd: tempDir });
+  const first = await listAlerts({ cwd: tempDir });
+  expect(first).toHaveLength(1);
+  expect(first[0]).toMatchObject({ code: "human-deployed-outside", status: "open", occurrenceCount: 2, subject: { type: "human", id: "human-1" } });
+  const acknowledged = await acknowledgeAlert(first[0].id, { cwd: tempDir });
+  expect(acknowledged.status).toBe("acknowledged");
+  await getEvaStatus({ cwd: tempDir });
+  expect((await listAlerts({ cwd: tempDir }))[0].occurrenceCount).toBe(3);
+  await dockExplorer({ cwd: tempDir });
+  expect((await listAlerts({ cwd: tempDir }))[0].status).toBe("resolved");
 });
 
 test("listBlueprintCatalog fetches official blueprints without changing local state", async () => {
@@ -1909,6 +2126,7 @@ test("scanHabitat uses the saved habitat ID and returns Kepler scan data unchang
       powerShortageKwh: 0,
     },
     tickHistory: [],
+    evaState: { deployedHumanId: "human-1", position: { x: 3, y: -2 }, carriedResources: {}, maxCarryCapacityKg: 10 },
   });
   const expected = {
     scan: {
@@ -1932,8 +2150,6 @@ test("scanHabitat uses the saved habitat ID and returns Kepler scan data unchang
 
   const result = await scanHabitat({
     cwd: tempDir,
-    x: 3,
-    y: -2,
     sensorStrength: 100,
     radiusTiles: 0,
     fetchImpl: async (input, init) => {
@@ -1958,15 +2174,71 @@ test("scanHabitat uses the saved habitat ID and returns Kepler scan data unchang
 });
 
 test("scanHabitat rejects invalid coordinates, strength, and radius", async () => {
-  await expect(scanHabitat({ cwd: tempDir, x: 1.5, y: 0, sensorStrength: 50, radiusTiles: 0 })).rejects.toThrow(
-    "scan x must be an integer",
-  );
-  await expect(scanHabitat({ cwd: tempDir, x: 0, y: 0, sensorStrength: 101, radiusTiles: 0 })).rejects.toThrow(
+  await expect(scanHabitat({ cwd: tempDir, sensorStrength: 101, radiusTiles: 0 })).rejects.toThrow(
     "sensor strength must be an integer between 0 and 100",
   );
-  await expect(scanHabitat({ cwd: tempDir, x: 0, y: 0, sensorStrength: 50, radiusTiles: 6 })).rejects.toThrow(
+  await expect(scanHabitat({ cwd: tempDir, sensorStrength: 50, radiusTiles: 6 })).rejects.toThrow(
     "scan radius must be an integer between 0 and 5",
   );
+});
+
+test("scanHabitat rejects when no human is deployed", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [], starterHumans: [], blueprints: [], modules: [],
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  });
+  await expect(scanHabitat({ cwd: tempDir, sensorStrength: 100, radiusTiles: 0 })).rejects.toThrow("No human is currently deployed");
+});
+
+test("collectResource calls Kepler and updates carried resources only after success", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [], starterHumans: [], blueprints: [], modules: [],
+    evaState: { deployedHumanId: "human-1", position: { x: 3, y: -2 }, carriedResources: {}, maxCarryCapacityKg: 10 },
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  });
+  let requestBody: unknown;
+  const result = await collectResource(5, {
+    cwd: tempDir,
+    fetchImpl: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return Response.json({ collection: { x: 3, y: -2, resourceType: "ferrite", unit: "kg", collectedKg: 5, remainingKg: 10 } });
+    },
+  });
+  expect(requestBody).toEqual({ habitatId: "habitat-1", x: 3, y: -2, quantityKg: 5 });
+  expect(result.eva.carriedResources).toEqual({ ferrite: 5 });
+  await expect(collectResource(1, { cwd: tempDir, fetchImpl: async () => new Response(JSON.stringify({ error: { message: "tile has no material" } }), { status: 400 }) })).rejects.toThrow("tile has no material");
+  await expect(getEvaStatus({ cwd: tempDir })).resolves.toMatchObject({ carriedResources: { ferrite: 5 } });
+});
+
+test("dock unloads carried resources and returns the human to the suitport atomically", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [],
+    starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "suitport-1" }], blueprints: [],
+    modules: [
+      { id: "suitport-1", habitatId: "habitat-1", blueprintId: "basic-suitport", moduleType: "basic-suitport", displayName: "Basic Suitport", connectedTo: [], runtimeAttributes: { status: "online" }, capabilities: ["limited-eva"], source: "kepler-registration", createdAt: "", updatedAt: "" },
+      { id: "cache-1", habitatId: "habitat-1", blueprintId: "supply-cache", moduleType: "supply-cache", displayName: "Supply Cache", connectedTo: [], runtimeAttributes: { status: "offline", storedResources: { ferrite: 2 } }, capabilities: ["storage"], source: "kepler-registration", createdAt: "", updatedAt: "" },
+    ],
+    evaState: { deployedHumanId: "human-1", position: { x: 0, y: 0 }, carriedResources: { ferrite: 3 }, maxCarryCapacityKg: 10 },
+    powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  });
+
+  await expect(dockExplorer({ cwd: tempDir })).resolves.toMatchObject({ deployedHumanId: null, position: { x: 0, y: 0 }, carriedResources: {} });
+  const registration = await loadLocalRegistration(tempDir);
+  expect(registration?.starterHumans).toEqual([{ id: "human-1", displayName: "Abigail", locationModuleId: "suitport-1" }]);
+  expect(registration?.modules.find((module) => module.id === "cache-1")?.runtimeAttributes.storedResources).toEqual({ ferrite: 5 });
+  expect(await listInventory({ cwd: tempDir })).toEqual([{ resource: "ferrite", quantity: 5 }]);
+});
+
+test("dock failure leaves EVA state and carried resources unchanged", async () => {
+  await getLocalStateStore(tempDir).save({
+    habitatUuid: "11111111-1111-4111-8111-111111111111", habitatId: "habitat-1", displayName: "Artemis Ridge", registeredAt: "2026-07-06T12:00:00.000Z", currentTick: 0, starterModules: [], starterHumans: [{ id: "human-1", displayName: "Abigail", locationModuleId: "suitport-1" }], blueprints: [], modules: [{ id: "suitport-1", habitatId: "habitat-1", blueprintId: "basic-suitport", moduleType: "basic-suitport", displayName: "Basic Suitport", connectedTo: [], runtimeAttributes: { status: "online" }, capabilities: ["limited-eva"], source: "kepler-registration", createdAt: "", updatedAt: "" }], evaState: { deployedHumanId: "human-1", position: { x: 0, y: 0 }, carriedResources: { ferrite: 3 }, maxCarryCapacityKg: 10 }, powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 }, tickHistory: [],
+  });
+
+  await expect(dockExplorer({ cwd: tempDir })).rejects.toThrow("storage module");
+  await expect(getEvaStatus({ cwd: tempDir })).resolves.toMatchObject({ deployedHumanId: "human-1", carriedResources: { ferrite: 3 } });
 });
 
 test("unregisterHabitat deletes server registration before removing the local registration file", async () => {
