@@ -1,4 +1,7 @@
 import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   getLocalStatusSummary,
   getRegistrationStatus,
@@ -64,7 +67,6 @@ export type RegistrationView = {
   habitatUuid: string;
   habitatId: string;
   displayName: string;
-  apiToken: string;
 };
 
 type AppOptions = {
@@ -376,9 +378,62 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.get("/power/overview", async (context) => {
-    const modules = await getModules();
+    const [modules, localSummary, solarIrradiance] = await Promise.all([
+      getModules(),
+      getLocalSummary(),
+      getSolar(),
+    ]);
+    const generationKw = modules.reduce((total, module) => {
+      const status = String(module.runtimeAttributes.status ?? "offline");
+      const generation = module.runtimeAttributes.powerGenerationKw;
+      if (status === "offline" || status === "damaged" || typeof generation !== "number" || !Number.isFinite(generation)) {
+        return total;
+      }
+      return total + generation;
+    }, 0);
+    const consumptionKw = modules.reduce((total, module) => {
+      const status = String(module.runtimeAttributes.status ?? "offline");
+      const powerDraw = module.runtimeAttributes.powerDrawKw;
+      if (!powerDraw || typeof powerDraw !== "object" || Array.isArray(powerDraw)) return total;
+      const value = (powerDraw as Record<string, unknown>)[status];
+      return total + (typeof value === "number" && Number.isFinite(value) ? value : 0);
+    }, 0);
+    const batteryEnergyKwh = modules.reduce((total, module) => {
+      const value = module.runtimeAttributes.currentEnergyKwh;
+      return total + (typeof value === "number" && Number.isFinite(value) ? value : 0);
+    }, 0);
+    const batteryCapacityKwh = modules.reduce((total, module) => {
+      const value = module.runtimeAttributes.energyStorageKwh;
+      return total + (typeof value === "number" && Number.isFinite(value) ? value : 0);
+    }, 0);
+    const powerModules = modules.map((module) => {
+      const status = String(module.runtimeAttributes.status ?? "offline");
+      const powerDraw = module.runtimeAttributes.powerDrawKw;
+      const configuredDraw = powerDraw && typeof powerDraw === "object" && !Array.isArray(powerDraw)
+        ? (powerDraw as Record<string, unknown>)[status]
+        : undefined;
+      const configuredGeneration = module.runtimeAttributes.powerGenerationKw;
+      return {
+        ...module,
+        powerDrawKw: typeof configuredDraw === "number" && Number.isFinite(configuredDraw) ? configuredDraw : 0,
+        powerGenerationKw: status === "offline" || status === "damaged"
+          ? 0
+          : typeof configuredGeneration === "number" && Number.isFinite(configuredGeneration) ? configuredGeneration : 0,
+      };
+    });
     context.set("logSummary", `${modules.length} modules`);
-    return context.json({ modules });
+    return context.json({
+      modules: powerModules,
+      power: {
+        generationKw,
+        consumptionKw,
+        netPowerKw: generationKw - consumptionKw,
+        batteryEnergyKwh,
+        batteryCapacityKwh,
+        powerShortageKwh: localSummary.powerSummary.powerShortageKwh,
+      },
+      solarIrradiance: solarIrradiance.solarIrradiance,
+    });
   });
 
   app.post("/ticks", async (context) => {
@@ -422,6 +477,11 @@ export function createApp(options: AppOptions = {}) {
     return context.json({ construction });
   });
 
+  if (existsSync(join(process.cwd(), "web", "dist", "index.html"))) {
+    app.use("/*", serveStatic({ root: "./web/dist" }));
+    app.get("/*", serveStatic({ path: "./web/dist/index.html" }));
+  }
+
   return app;
 }
 
@@ -464,7 +524,6 @@ function toRegistrationView(registration: RegistrationSource): RegistrationView 
     habitatUuid: registration.habitatUuid,
     habitatId: registration.habitatId,
     displayName: registration.displayName,
-    apiToken: typeof registration.apiToken === "string" ? registration.apiToken : "",
   };
 }
 

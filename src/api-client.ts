@@ -64,7 +64,21 @@ export type InventoryMutationResponse = {
 };
 export type InventoryAddResponse = { inventory: InventoryAddResult };
 export type InventoryRemoveResponse = { inventory: InventoryRemoveResult };
-export type PowerOverviewResponse = { modules: HabitatModule[] };
+export type PowerOverviewResponse = {
+  modules: HabitatModule[];
+  power: {
+    generationKw: number;
+    consumptionKw: number;
+    netPowerKw: number;
+    batteryEnergyKwh: number;
+    batteryCapacityKwh: number;
+    powerShortageKwh: number;
+  };
+  solarIrradiance: {
+    wPerM2: number;
+    condition: string;
+  };
+};
 export type TickResponse = { tick: TickSummary };
 export type ConstructionDryRunResponse = { construction: ConstructionDryRun };
 export type ConstructionStartResponse = { construction: ConstructionStart };

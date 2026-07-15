@@ -38,7 +38,15 @@ test("GET /registration returns the registered habitat JSON shape", async () => 
   const response = await app.request("/registration");
 
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ registration });
+  const body = await response.json();
+  expect(body).toEqual({
+    registration: {
+      habitatUuid: registration.habitatUuid,
+      habitatId: registration.habitatId,
+      displayName: registration.displayName,
+    },
+  });
+  expect(JSON.stringify(body)).not.toContain("habitat-api-token");
 });
 
 test("POST /registration registers through the backend and returns structured JSON", async () => {
@@ -64,7 +72,13 @@ test("POST /registration registers through the backend and returns structured JS
 
   expect(response.status).toBe(201);
   expect(requestedName).toBe("Artemis Ridge");
-  expect(await response.json()).toEqual({ registration });
+  expect(await response.json()).toEqual({
+    registration: {
+      habitatUuid: registration.habitatUuid,
+      habitatId: registration.habitatId,
+      displayName: registration.displayName,
+    },
+  });
 });
 
 test("GET /status combines remote registration status with local state summary", async () => {
@@ -221,6 +235,57 @@ test("catalog and solar routes proxy structured backend data", async () => {
   });
   expect(await (await app.request("/solar/irradiance")).json()).toEqual({
     solarIrradiance: { wPerM2: 900, condition: "clear" },
+  });
+});
+
+test("GET /power/overview returns backend-owned balance and solar data", async () => {
+  const modules = [
+    {
+      id: "solar-1",
+      runtimeAttributes: { status: "online", powerGenerationKw: 12, powerDrawKw: { online: 1 } },
+      capabilities: ["solar-generation"],
+      moduleType: "solar-array",
+    },
+    {
+      id: "lab-1",
+      runtimeAttributes: { status: "online", powerDrawKw: { online: 5 } },
+      capabilities: [],
+      moduleType: "laboratory",
+    },
+  ];
+  const app = createApp({
+    listModules: async () => modules as never,
+    getLocalStatusSummary: async () => ({
+      currentTick: 120,
+      moduleCount: 2,
+      powerSummary: {
+        totalPowerDrawKw: 6,
+        energyUsedKwh: 0.2,
+        batteryEnergyKwh: 40,
+        batteryCapacityKwh: 80,
+        powerShortageKwh: 0,
+      },
+    }),
+    getSolarIrradiance: async () => ({ solarIrradiance: { wPerM2: 700, condition: "partly-cloudy" } }),
+  });
+
+  const response = await app.request("/power/overview");
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    power: {
+      generationKw: 12,
+      consumptionKw: 6,
+      netPowerKw: 6,
+      batteryEnergyKwh: 0,
+      batteryCapacityKwh: 0,
+      powerShortageKwh: 0,
+    },
+    solarIrradiance: { wPerM2: 700, condition: "partly-cloudy" },
+    modules: [
+      { ...modules[0], powerDrawKw: 1, powerGenerationKw: 12 },
+      { ...modules[1], powerDrawKw: 5, powerGenerationKw: 0 },
+    ],
   });
 });
 

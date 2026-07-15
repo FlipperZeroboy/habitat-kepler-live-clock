@@ -46,6 +46,7 @@ Examples:
   habitat solar status
   habitat tick 60
   habitat power overview
+  habitat power status
   habitat blueprint list
   habitat construct small-solar-array --dry-run
   habitat construction status
