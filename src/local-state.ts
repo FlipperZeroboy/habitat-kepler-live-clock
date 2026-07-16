@@ -43,6 +43,9 @@ function normalizeRegistration(registration: Partial<LocalRegistration>, modules
       clock: {
         mode: clock.mode === "kepler" ? "kepler" : "manual",
         connected: clock.connected === true,
+        connectionStatus: clock.connectionStatus === "connected" || clock.connectionStatus === "connecting" || clock.connectionStatus === "error"
+          ? clock.connectionStatus
+          : "disconnected",
         lastKeplerTick: typeof clock.lastKeplerTick === "number" ? clock.lastKeplerTick : null,
         lastAdvancedBy: typeof clock.lastAdvancedBy === "number" ? clock.lastAdvancedBy : null,
         lastConnectedAt: typeof clock.lastConnectedAt === "string" ? clock.lastConnectedAt : null,

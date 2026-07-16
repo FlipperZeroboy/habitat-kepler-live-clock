@@ -137,6 +137,7 @@ test("clock routes persist mode and reject manual ticks while listening", async 
   const clock = () => ({
     mode,
     connected: false,
+    connectionStatus: "disconnected" as const,
     lastKeplerTick: null,
     lastAdvancedBy: null,
     lastConnectedAt: null,
@@ -151,10 +152,22 @@ test("clock routes persist mode and reject manual ticks while listening", async 
     tickHabitat: async () => { throw new Error("manual tick should not run"); },
   });
 
-  expect(await (await app.request("/clock/status")).json()).toEqual({ clock: clock() });
+  expect(await (await app.request("/clock/status")).json()).toEqual({
+    clock: {
+      ...clock(),
+      listening: false,
+      manualTicksAllowed: true,
+    },
+  });
   expect(await (await app.request("/clock/listen", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }),
-  })).json()).toEqual({ clock: clock() });
+  })).json()).toEqual({
+    clock: {
+      ...clock(),
+      listening: true,
+      manualTicksAllowed: false,
+    },
+  });
   const rejected = await app.request("/ticks", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ count: 1 }),
   });

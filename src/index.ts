@@ -125,6 +125,14 @@ program
       console.log(`Current Tick: ${currentTick}`);
       console.log(`Stream URL: ${response.status.streamUrl ?? "not available"}`);
       console.log(`Stream API Token: ${response.status.apiToken ?? "not available"}`);
+      console.log(`Stream Subscriptions: ${response.status.stream?.subscriptions?.join(", ") ?? "not available"}`);
+      if (response.status.stream) {
+        console.log(
+          `Planet Clock: ${response.status.stream.status} (tick ${response.status.stream.currentTick}, ${response.status.stream.ticksPerPulse} ticks/pulse, ${response.status.stream.tickIntervalMs} ms interval)`,
+        );
+      } else {
+        console.log("Planet Clock: not available");
+      }
       console.log(`Clock Mode: ${response.status.clock?.mode ?? "manual"}`);
       console.log(`Modules: ${moduleCount}`);
       console.log(`Total Power Draw: ${formatNumber(powerSummary.totalPowerDrawKw)} kW`);
@@ -181,10 +189,20 @@ const clock = program.command("clock").description("Control Kepler live clock li
 clock
   .command("status")
   .description("Show the persisted Habitat clock mode and connection state.")
-  .action(async () => {
+  .option("--json", "Print clock status as JSON")
+  .action(async (options: { json?: boolean }) => {
     try {
       const { clock: state } = await apiClient.get<ClockStatusResponse>("/clock/status");
+      if (options.json) {
+        console.log(JSON.stringify(state, null, 2));
+        return;
+      }
+      const listening = state.listening ?? state.mode === "kepler";
+      const manualTicksAllowed = state.manualTicksAllowed ?? state.mode === "manual";
       console.log(`Clock Mode: ${state.mode}`);
+      console.log(`Listening: ${listening ? "on" : "off"}`);
+      console.log(`Manual Ticks Allowed: ${manualTicksAllowed ? "yes" : "no"}`);
+      console.log(`Connection Status: ${state.connectionStatus ?? (state.connected ? "connected" : "disconnected")}`);
       console.log(`Kepler Connected: ${state.connected ? "yes" : "no"}`);
       console.log(`Last Kepler Tick: ${state.lastKeplerTick ?? "never"}`);
       console.log(`Last Advanced By: ${state.lastAdvancedBy ?? "never"}`);

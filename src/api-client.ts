@@ -50,11 +50,13 @@ export type StatusResponse = {
     };
     streamUrl: string | null;
     apiToken: string | null;
-    stream: StreamMetadata | null;
-    clock: ClockState;
+    stream?: StreamMetadata | null;
+    clock?: ClockState;
   };
 };
-export type ClockStatusResponse = { clock: ClockState };
+export type ClockStatusResponse = {
+  clock: ClockState & { listening: boolean; manualTicksAllowed: boolean };
+};
 
 export type ModulesResponse = { modules: HabitatModule[] };
 export type HumansResponse = { humans: StarterHuman[] };

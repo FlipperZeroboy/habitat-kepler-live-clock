@@ -56,6 +56,7 @@ export type EvaState = {
 };
 
 export type ClockMode = "manual" | "kepler";
+export type ConnectionStatus = "connected" | "connecting" | "disconnected" | "error";
 
 export type StreamMetadata = {
   protocolVersion: string;
@@ -69,6 +70,7 @@ export type StreamMetadata = {
 export type ClockState = {
   mode: ClockMode;
   connected: boolean;
+  connectionStatus: ConnectionStatus;
   lastKeplerTick: number | null;
   lastAdvancedBy: number | null;
   lastConnectedAt: string | null;
@@ -626,6 +628,7 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
       clock: {
         mode: "manual",
         connected: false,
+        connectionStatus: "disconnected",
         lastKeplerTick: null,
         lastAdvancedBy: null,
         lastConnectedAt: null,
@@ -1061,6 +1064,7 @@ export function createDefaultClockState(): ClockState {
   return {
     mode: "manual",
     connected: false,
+    connectionStatus: "disconnected",
     lastKeplerTick: null,
     lastAdvancedBy: null,
     lastConnectedAt: null,
@@ -1080,6 +1084,7 @@ export async function setClockListening(enabled: boolean, options: RuntimeOption
     ...(registration.clock ?? createDefaultClockState()),
     mode: enabled ? "kepler" : "manual",
     connected: false,
+    connectionStatus: enabled ? "connecting" : "disconnected",
     lastConnectionError: null,
   };
   await saveLocalRegistration(cwd, registration);
@@ -1091,6 +1096,7 @@ export async function recordClockConnection(options: RuntimeOptions = {}): Promi
   registration.clock = {
     ...(registration.clock ?? createDefaultClockState()),
     connected: true,
+    connectionStatus: "connected",
     lastConnectedAt: new Date().toISOString(),
     lastConnectionError: null,
   };
@@ -1103,6 +1109,7 @@ export async function recordClockError(message: string, options: RuntimeOptions 
   registration.clock = {
     ...(registration.clock ?? createDefaultClockState()),
     connected: false,
+    connectionStatus: "error",
     lastConnectionError: message,
   };
   await saveLocalRegistration(cwd, registration);

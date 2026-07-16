@@ -523,6 +523,26 @@ function startRegistrationBackendServer() {
               batteryCapacityKwh: 200,
               powerShortageKwh: 0,
             },
+            streamUrl: "wss://planet.turingguild.com/planet/stream",
+            apiToken: "habitat-stream-token",
+            stream: {
+              protocolVersion: "1.0",
+              subscriptions: ["ticks"],
+              currentTick: 800,
+              tickIntervalMs: 1000,
+              ticksPerPulse: 1,
+              status: "running",
+            },
+            clock: {
+              mode: "manual",
+              connected: false,
+              connectionStatus: "disconnected",
+              lastKeplerTick: null,
+              lastAdvancedBy: null,
+              lastConnectedAt: null,
+              lastMessageAt: null,
+              lastConnectionError: null,
+            },
           },
         });
       }
@@ -558,6 +578,10 @@ test("registration lifecycle commands use the backend and keep friendly output",
   expect(await statusProc.exited).toBe(0);
   expect(statusOutput).toContain("Habitat ID: habitat_11111111_1111_4111_8111_111111111111");
   expect(statusOutput).toContain("Current Tick: 60");
+  expect(statusOutput).toContain("Stream URL: wss://planet.turingguild.com/planet/stream");
+  expect(statusOutput).toContain("Stream API Token: habitat-stream-token");
+  expect(statusOutput).toContain("Stream Subscriptions: ticks");
+  expect(statusOutput).toContain("Planet Clock: running (tick 800, 1 ticks/pulse, 1000 ms interval)");
 
   const unregisterProc = Bun.spawn(["bun", "run", "src/index.ts", "unregister"], {
     cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env,

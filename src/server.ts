@@ -306,7 +306,7 @@ export function createApp(options: AppOptions = {}) {
   app.get("/clock/status", async (context) => {
     const clock = await getClock();
     context.set("logSummary", `clock ${clock.mode}`);
-    return context.json({ clock });
+    return context.json({ clock: toClockStatus(clock) });
   });
 
   app.post("/clock/listen", async (context) => {
@@ -316,12 +316,17 @@ export function createApp(options: AppOptions = {}) {
     }
     const clock = await updateClockListening(body.enabled);
     if (body.enabled) {
-      await startClockListener();
+      try {
+        await startClockListener();
+      } catch (error) {
+        await recordClockError(error instanceof Error ? error.message : "Could not start Kepler clock listening.");
+        throw error;
+      }
     } else {
       stopClockListener();
     }
     context.set("logSummary", `clock ${clock.mode}`);
-    return context.json({ clock });
+    return context.json({ clock: toClockStatus(clock) });
   });
 
   app.get("/clock/watch", async () => {
@@ -634,6 +639,14 @@ function toRegistrationView(registration: RegistrationSource): RegistrationView 
     habitatUuid: registration.habitatUuid,
     habitatId: registration.habitatId,
     displayName: registration.displayName,
+  };
+}
+
+function toClockStatus(clock: ClockState) {
+  return {
+    ...clock,
+    listening: clock.mode === "kepler",
+    manualTicksAllowed: clock.mode === "manual",
   };
 }
 
