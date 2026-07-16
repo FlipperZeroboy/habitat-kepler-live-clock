@@ -591,12 +591,12 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
   );
   const existingRegistration = await loadLocalRegistration(cwd);
 
-  if (existingRegistration) {
+  if (existingRegistration && (existingRegistration.streamUrl || existingRegistration.apiToken || existingRegistration.stream)) {
     throw new Error(`Habitat is already registered: ${existingRegistration.habitatId}`);
   }
 
   const config = await loadConfig(cwd);
-  const habitatUuid = (options.randomUuid ?? randomUUID)();
+  const habitatUuid = existingRegistration?.habitatUuid || (options.randomUuid ?? randomUUID)();
   const fetchImpl = options.fetchImpl ?? fetch;
   const response = await fetchImpl(`${config.baseUrl}/habitats/register`, {
     method: "POST",
@@ -616,11 +616,12 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
   const starterModules = Array.isArray(body.starterModules) ? body.starterModules : [];
 
   const registration: LocalRegistration = {
+    ...(existingRegistration ?? {}),
     habitatUuid,
-    habitatId: body.habitatId,
+    habitatId: body.habitatId ?? existingRegistration?.habitatId ?? "",
     displayName: name,
-    registeredAt,
-    currentTick: 0,
+    registeredAt: existingRegistration?.registeredAt ?? registeredAt,
+    currentTick: existingRegistration?.currentTick ?? 0,
     streamUrl: body.streamUrl,
     apiToken: body.apiToken,
     stream: body.stream,
@@ -636,22 +637,22 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
         lastConnectionError: null,
       },
     } : {}),
-    starterModules,
-    starterHumans: hydrateStarterHumans(body.starterHumans),
-    contracts: body.contracts?.alerts
+    starterModules: existingRegistration?.starterModules?.length ? existingRegistration.starterModules : starterModules,
+    starterHumans: existingRegistration?.starterHumans?.length ? existingRegistration.starterHumans : hydrateStarterHumans(body.starterHumans),
+    contracts: existingRegistration?.contracts ?? (body.contracts?.alerts
       ? { alerts: body.contracts.alerts }
-      : undefined,
-    blueprints: Array.isArray(body.blueprints) ? body.blueprints : [],
-    modules: hydrateStarterModules(body.habitatId, starterModules, registeredAt),
-    alerts: [],
-    powerSummary: {
+      : undefined),
+    blueprints: existingRegistration?.blueprints?.length ? existingRegistration.blueprints : (Array.isArray(body.blueprints) ? body.blueprints : []),
+    modules: existingRegistration?.modules?.length ? existingRegistration.modules : hydrateStarterModules(body.habitatId, starterModules, registeredAt),
+    alerts: existingRegistration?.alerts ?? [],
+    powerSummary: existingRegistration?.powerSummary ?? {
       totalPowerDrawKw: 0,
       energyUsedKwh: 0,
       batteryEnergyKwh: 0,
       batteryCapacityKwh: 0,
       powerShortageKwh: 0,
     },
-    tickHistory: [],
+    tickHistory: existingRegistration?.tickHistory ?? [],
   };
 
   await saveLocalRegistration(cwd, registration);
@@ -1125,6 +1126,7 @@ export async function applyKeplerTick(
   const { cwd, registration } = await loadRequiredRegistration(options);
   const clock = registration.clock ?? createDefaultClockState();
   if (clock.mode !== "kepler") return null;
+  if (clock.lastKeplerTick !== null && tick <= clock.lastKeplerTick) return null;
   if (!Number.isInteger(advancedBy) || advancedBy <= 0) {
     throw new Error("Kepler advancedBy must be a positive integer.");
   }

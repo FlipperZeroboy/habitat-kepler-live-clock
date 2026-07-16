@@ -25,6 +25,10 @@ const globalJsonRequested = process.argv[2] === "--json";
 if (globalJsonRequested) {
   process.argv.splice(2, 1);
 }
+const globalJsonlRequested = process.argv[2] === "--jsonl";
+if (globalJsonlRequested) {
+  process.argv.splice(2, 1);
+}
 
 const program = new Command();
 const apiClient = createApiClient();
@@ -238,13 +242,14 @@ for (const [name, enabled] of [["on", true], ["off", false]] as const) {
 clock
   .command("watch")
   .description("Watch future Kepler ticks applied by the local Habitat backend.")
-  .action(async () => {
+  .option("--jsonl", "Print one JSON object per event")
+  .action(async (options: { jsonl?: boolean }) => {
     const abortController = new AbortController();
     const stop = () => abortController.abort();
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
-      const response = await fetch(`${apiClient.baseUrl}/clock/watch`, { signal: abortController.signal });
+      const response = await fetch(`${apiClient.baseUrl}/clock/events`, { signal: abortController.signal });
       if (!response.ok || !response.body) {
         throw new Error(`Could not open the local Habitat clock watch (HTTP ${response.status}).`);
       }
@@ -259,7 +264,21 @@ clock
         buffer = events.pop() ?? "";
         for (const event of events) {
           const data = event.split("\n").find((line) => line.startsWith("data: "));
-          if (data) console.log(data.slice(6));
+          if (data) {
+            const event = JSON.parse(data.slice(6)) as {
+              tick: number;
+              advancedBy: number;
+              issuedAt: string;
+              applied: boolean;
+            };
+            if (options.jsonl || globalJsonlRequested) {
+              console.log(JSON.stringify(event));
+            } else {
+              console.log(
+                `planet_tick tick=${event.tick} advancedBy=${event.advancedBy} issuedAt=${event.issuedAt} applied=${event.applied ? "yes" : "no"}`,
+              );
+            }
+          }
         }
       }
     } catch (error) {

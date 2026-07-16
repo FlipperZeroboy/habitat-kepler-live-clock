@@ -198,6 +198,18 @@ test("GET /status reveals the saved stream credentials without putting them in l
   expect(logLines.join("\n")).not.toContain("habitat-stream-token");
 });
 
+test("GET /clock/events exposes a local SSE stream without Kepler credentials", async () => {
+  const app = createApp({ getClockState: async () => ({
+    mode: "manual", connected: false, connectionStatus: "disconnected",
+    lastKeplerTick: null, lastAdvancedBy: null, lastConnectedAt: null, lastMessageAt: null, lastConnectionError: null,
+  }) });
+
+  const response = await app.request("/clock/events");
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/event-stream");
+  expect(response.headers.get("content-type")).not.toContain("apiToken");
+});
+
 test("GET /humans returns starter humans from local registration state", async () => {
   const app = createApp({
     listHumans: async () => [

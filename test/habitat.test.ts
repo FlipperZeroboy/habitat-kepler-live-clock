@@ -536,6 +536,47 @@ test("Kepler clock mode persists and applies the notice advancedBy amount exactl
   });
 });
 
+test("legacy registration upgrade reuses the saved Habitat UUID and preserves local simulation state", async () => {
+  const legacy = {
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat-legacy",
+    displayName: "Artemis Ridge",
+    registeredAt: "2026-07-06T12:00:00.000Z",
+    currentTick: 61,
+    starterModules: [],
+    starterHumans: [],
+    blueprints: [],
+    modules: [{
+      id: "module-1", habitatId: "habitat-legacy", blueprintId: "command-module", moduleType: "command-module",
+      displayName: "Command", connectedTo: [], runtimeAttributes: { status: "active" }, capabilities: [],
+      source: "kepler-registration", createdAt: "2026-07-06T12:00:00.000Z", updatedAt: "2026-07-06T12:00:00.000Z",
+    }],
+    powerSummary: { totalPowerDrawKw: 8.5, energyUsedKwh: 0.14, batteryEnergyKwh: 1, batteryCapacityKwh: 1, powerShortageKwh: 0 },
+    tickHistory: [],
+  } satisfies LocalRegistration;
+  await getLocalStateStore(tempDir).save(legacy);
+  let requestBody: Record<string, unknown> | undefined;
+
+  const upgraded = await registerHabitat("Artemis Ridge", {
+    cwd: tempDir,
+    fetchImpl: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        habitatId: "habitat-legacy",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        apiToken: "legacy-upgraded-token",
+        stream: { protocolVersion: "1.0", subscriptions: ["ticks"], currentTick: 800, tickIntervalMs: 1000, ticksPerPulse: 1, status: "running" },
+        starterModules: [], starterHumans: [], blueprints: [],
+      }), { status: 201 });
+    },
+  });
+
+  expect(requestBody).toEqual({ displayName: "Artemis Ridge", habitatUuid: legacy.habitatUuid });
+  expect(upgraded.currentTick).toBe(61);
+  expect(upgraded.modules).toEqual(legacy.modules);
+  expect(upgraded.apiToken).toBe("legacy-upgraded-token");
+});
+
 test("registration persists every starter module and human in one local state", async () => {
   const starterModules = Array.from({ length: 6 }, (_, index) => ({
     id: `module-${index + 1}`,

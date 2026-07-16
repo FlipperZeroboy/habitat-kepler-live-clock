@@ -197,6 +197,7 @@ export function createApp(options: AppOptions = {}) {
     scanHabitat({ ...scanOptions, fetchImpl: keplerFetch }));
 
   let keplerStream: KeplerStream | null = null;
+  let inFlightTick: Promise<unknown> = Promise.resolve();
   const watchSubscribers = new Set<(event: Record<string, unknown>) => void>();
 
   const stopClockListenerInternal = () => {
@@ -210,24 +211,37 @@ export function createApp(options: AppOptions = {}) {
     if (!registration?.streamUrl || !registration.apiToken) {
       throw new Error("No Kepler stream credentials are saved. Register the habitat again.");
     }
+    const subscriptions = registration.stream?.subscriptions ?? [];
+    if (!subscriptions.includes("ticks")) {
+      throw new Error("Kepler registration does not advertise tick listening.");
+    }
     keplerStream = createKeplerStream({
       streamUrl: registration.streamUrl,
       apiToken: registration.apiToken,
+      habitatId: registration.habitatId,
+      subscriptions: subscriptions.filter((subscription) => subscription === "ticks"),
+      lastAppliedTick: registration.clock?.lastKeplerTick,
       onConnected: async () => { await recordClockConnection(); },
       onError: async (message) => { await recordClockError(message); },
-      onMessage: async (notice: PlanetTickMessage) => {
-        const clock = await getClock();
-        if (clock.mode !== "kepler") return;
-        const summary = await applyKeplerTick(notice.tick, notice.advancedBy, notice.issuedAt);
-        if (!summary) return;
-        const event = {
-          type: "planet_tick",
-          tick: notice.tick,
-          advancedBy: notice.advancedBy,
-          currentTick: summary.currentTick,
-          issuedAt: notice.issuedAt,
-        };
-        for (const subscriber of watchSubscribers) subscriber(event);
+      onMessage: (notice: PlanetTickMessage) => {
+        const task = inFlightTick.then(async () => {
+          const clock = await getClock();
+          if (clock.mode !== "kepler") return false;
+          const summary = await applyKeplerTick(notice.tick, notice.advancedBy, notice.issuedAt);
+          if (!summary) return false;
+          const event = {
+            type: "planet_tick",
+            tick: notice.tick,
+            advancedBy: notice.advancedBy,
+            currentTick: summary.currentTick,
+            issuedAt: notice.issuedAt,
+            applied: true,
+          };
+          for (const subscriber of watchSubscribers) subscriber(event);
+          return true;
+        });
+        inFlightTick = task.catch(() => undefined);
+        return task;
       },
     });
     keplerStream.start();
@@ -314,22 +328,26 @@ export function createApp(options: AppOptions = {}) {
     if (typeof body.enabled !== "boolean") {
       return context.json({ error: { message: "clock listening enabled must be a boolean" } }, 400);
     }
-    const clock = await updateClockListening(body.enabled);
     if (body.enabled) {
+      const clock = await updateClockListening(true);
       try {
         await startClockListener();
       } catch (error) {
         await recordClockError(error instanceof Error ? error.message : "Could not start Kepler clock listening.");
         throw error;
       }
+      context.set("logSummary", `clock ${clock.mode}`);
+      return context.json({ clock: toClockStatus(clock) });
     } else {
       stopClockListener();
+      await inFlightTick;
+      const clock = await updateClockListening(false);
+      context.set("logSummary", `clock ${clock.mode}`);
+      return context.json({ clock: toClockStatus(clock) });
     }
-    context.set("logSummary", `clock ${clock.mode}`);
-    return context.json({ clock: toClockStatus(clock) });
   });
 
-  app.get("/clock/watch", async () => {
+  const clockEvents = async () => {
     const encoder = new TextEncoder();
     let subscriber: ((event: Record<string, unknown>) => void) | null = null;
     const stream = new ReadableStream<Uint8Array>({
@@ -348,7 +366,9 @@ export function createApp(options: AppOptions = {}) {
         Connection: "keep-alive",
       },
     });
-  });
+  };
+  app.get("/clock/events", clockEvents);
+  app.get("/clock/watch", clockEvents);
 
   app.get("/catalog/blueprints", async (context) => {
     context.set("logSummary", "proxied to Kepler");
