@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { habitatApi, type HabitatApi } from "./api";
 import type { DashboardData, Registration } from "./types";
 
@@ -18,6 +18,26 @@ function messageFor(error: unknown) {
   return error instanceof Error ? error.message : "Habitat backend request failed.";
 }
 
+export function createSharedTickOperationGuard<Args extends unknown[], Result>(
+  operation: (...args: Args) => Promise<Result>,
+) {
+  let inFlight: Promise<Result> | null = null;
+
+  return (...args: Args) => {
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const guardedPromise = operation(...args).finally(() => {
+      if (inFlight === guardedPromise) {
+        inFlight = null;
+      }
+    });
+    inFlight = guardedPromise;
+    return guardedPromise;
+  };
+}
+
 export async function runDashboardMutation({
   operation,
   refresh,
@@ -27,14 +47,17 @@ export async function runDashboardMutation({
   refresh: () => Promise<void>;
   refreshOnError?: boolean;
 }): Promise<DashboardMutationResult> {
+  let operationCompleted = false;
+
   try {
     await operation();
+    operationCompleted = true;
     await refresh();
     return { ok: true };
   } catch (error) {
     const errorMessage = messageFor(error);
 
-    if (refreshOnError) {
+    if (refreshOnError && !operationCompleted) {
       try {
         await refresh();
       } catch {
@@ -48,8 +71,10 @@ export async function runDashboardMutation({
 
 export function useDashboard(api: HabitatApi = habitatApi) {
   const [state, setState] = useState<DashboardState>({ data: null, registered: null, loading: true, mutating: null, error: null });
+  const runTickMutationRef = useRef<(count: number) => Promise<boolean>>(() => Promise.resolve(false));
+  const tickOperationGuardRef = useRef<((count: number) => Promise<boolean>) | null>(null);
 
-  const refresh = useCallback(async () => {
+  const loadDashboardState = useCallback(async (options?: { throwOnError?: boolean }) => {
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
       const registrationResponse = await api.registration();
@@ -67,18 +92,27 @@ export function useDashboard(api: HabitatApi = habitatApi) {
       });
     } catch (error) {
       setState((current) => ({ ...current, loading: false, error: messageFor(error) }));
+      if (options?.throwOnError) {
+        throw error;
+      }
     }
   }, [api]);
+
+  const refresh = useCallback(() => loadDashboardState(), [loadDashboardState]);
+  const refreshForMutation = useCallback(
+    () => loadDashboardState({ throwOnError: true }),
+    [loadDashboardState],
+  );
 
   const mutate = useCallback(async (
     label: string,
     operation: () => Promise<unknown>,
-    options?: { refreshOnError?: boolean },
+    options?: { refreshOnError?: boolean; refresh?: () => Promise<void> },
   ) => {
     setState((current) => ({ ...current, mutating: label, error: null }));
     const result = await runDashboardMutation({
       operation,
-      refresh,
+      refresh: options?.refresh ?? refresh,
       refreshOnError: options?.refreshOnError ?? false,
     });
 
@@ -93,9 +127,21 @@ export function useDashboard(api: HabitatApi = habitatApi) {
   const register = useCallback((displayName: string) => mutate("register", () => api.register(displayName)), [api, mutate]);
   const unregister = useCallback(() => mutate("unregister", () => api.unregister()), [api, mutate]);
   const setModuleStatus = useCallback((moduleId: string, status: "offline" | "online") => mutate(`module:${moduleId}`, () => api.updateModule(moduleId, status)), [api, mutate]);
+
+  runTickMutationRef.current = (count: number) => (
+    mutate(`tick:${count}`, () => api.tick(count), {
+      refreshOnError: true,
+      refresh: refreshForMutation,
+    })
+  );
+
+  if (tickOperationGuardRef.current === null) {
+    tickOperationGuardRef.current = createSharedTickOperationGuard((count: number) => runTickMutationRef.current(count));
+  }
+
   const advanceTicks = useCallback(
-    (count: number) => mutate(`tick:${count}`, () => api.tick(count), { refreshOnError: true }),
-    [api, mutate],
+    (count: number) => tickOperationGuardRef.current?.(count) ?? Promise.resolve(false),
+    [],
   );
 
   return { ...state, refresh, register, unregister, setModuleStatus, advanceTicks };

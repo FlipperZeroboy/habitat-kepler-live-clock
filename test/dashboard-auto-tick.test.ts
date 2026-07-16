@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AutoTickControl } from "../web/src/App";
+import { AutoTickControl, shouldDisableManualTickControls } from "../web/src/App";
 import { createAutoTickScheduler } from "../web/src/use-auto-tick";
 
 test("runs one immediate tick and one tick per interval", async () => {
   const calls: number[] = [];
   let intervalCallback: (() => void) | undefined;
+  let intervalDelay: number | undefined;
 
   const scheduler = createAutoTickScheduler({
     tick: async () => {
@@ -14,8 +15,9 @@ test("runs one immediate tick and one tick per interval", async () => {
       return true;
     },
     isManualAllowed: () => true,
-    setIntervalImpl: (callback) => {
+    setIntervalImpl: (callback, delay) => {
       intervalCallback = callback;
+      intervalDelay = delay;
       return 1 as ReturnType<typeof setInterval>;
     },
     clearIntervalImpl: () => {},
@@ -26,6 +28,7 @@ test("runs one immediate tick and one tick per interval", async () => {
   intervalCallback?.();
   await Promise.resolve();
 
+  expect(intervalDelay).toBe(1000);
   expect(calls).toEqual([1, 1]);
 });
 
@@ -130,6 +133,33 @@ test("skips overlapping interval callbacks while a tick is still running", async
   await Promise.resolve();
 });
 
+test("ignores interval callbacks after the scheduler is stopped", async () => {
+  let intervalCallback: (() => void) | undefined;
+  let calls = 0;
+
+  const scheduler = createAutoTickScheduler({
+    tick: async () => {
+      calls += 1;
+      return true;
+    },
+    isManualAllowed: () => true,
+    setIntervalImpl: (callback) => {
+      intervalCallback = callback;
+      return 1 as ReturnType<typeof setInterval>;
+    },
+    clearIntervalImpl: () => {},
+  });
+
+  scheduler.start();
+  await Promise.resolve();
+  scheduler.stop();
+  intervalCallback?.();
+  await Promise.resolve();
+
+  expect(calls).toBe(1);
+  expect(scheduler.running()).toBe(false);
+});
+
 test("renders auto-tick control with manual mode and start action", () => {
   const html = renderToStaticMarkup(
     createElement(AutoTickControl, {
@@ -148,7 +178,43 @@ test("renders auto-tick control with manual mode and start action", () => {
   expect(html).not.toContain("disabled");
 });
 
-test("renders disabled auto-tick control while Kepler listening is on", () => {
+test("keeps the stop auto-tick button enabled while a tick request is in flight", () => {
+  const html = renderToStaticMarkup(
+    createElement(AutoTickControl, {
+      mode: "manual",
+      manualTicksAllowed: true,
+      mutating: true,
+      running: true,
+      onToggle: () => {},
+    }),
+  );
+
+  expect(html).toContain("Stop Auto Tick");
+  expect(html).not.toContain("disabled");
+});
+
+test("disables the start auto-tick button while another mutation is in flight", () => {
+  const html = renderToStaticMarkup(
+    createElement(AutoTickControl, {
+      mode: "manual",
+      manualTicksAllowed: true,
+      mutating: true,
+      running: false,
+      onToggle: () => {},
+    }),
+  );
+
+  expect(html).toContain("Start Auto Tick");
+  expect(html).toContain("disabled");
+});
+
+test("disables manual tick controls while auto-tick is running", () => {
+  expect(shouldDisableManualTickControls(false, true)).toBe(true);
+  expect(shouldDisableManualTickControls(true, false)).toBe(true);
+  expect(shouldDisableManualTickControls(false, false)).toBe(false);
+});
+
+test("keeps the stop auto-tick control enabled while Kepler listening is on", () => {
   const html = renderToStaticMarkup(
     createElement(AutoTickControl, {
       mode: "kepler",
@@ -163,5 +229,5 @@ test("renders disabled auto-tick control while Kepler listening is on", () => {
   expect(html).toContain("Auto Tick on");
   expect(html).toContain("Unavailable while Kepler listening is on");
   expect(html).toContain("Stop Auto Tick");
-  expect(html).toContain("disabled");
+  expect(html).not.toContain("disabled");
 });
