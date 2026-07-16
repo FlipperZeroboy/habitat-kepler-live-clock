@@ -1,4 +1,5 @@
 import type {
+  ClockStatusResponse,
   HabitatModule,
   PowerOverviewResponse,
   RegistrationResponse,
@@ -47,6 +48,7 @@ export const habitatApi = {
   status: () => request<StatusResponse>("/status"),
   modules: () => request<{ modules: HabitatModule[] }>("/modules"),
   powerOverview: () => request<PowerOverviewResponse>("/power/overview"),
+  clockStatus: () => request<ClockStatusResponse>("/clock/status"),
   updateModule: (id: string, status: "offline" | "online") => request<{ module: HabitatModule }>(`/modules/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ status }) }),
   tick: (count: number) => request<TickResponse>("/ticks", { method: "POST", body: JSON.stringify({ count }) }),
 };

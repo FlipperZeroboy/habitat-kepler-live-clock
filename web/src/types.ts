@@ -78,8 +78,24 @@ export type TickResponse = {
   };
 };
 
+export type ClockStatus = {
+  mode: "manual" | "kepler";
+  connected: boolean;
+  connectionStatus: "connected" | "connecting" | "disconnected" | "error";
+  lastKeplerTick: number | null;
+  lastAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastConnectionError: string | null;
+  listening: boolean;
+  manualTicksAllowed: boolean;
+};
+
+export type ClockStatusResponse = { clock: ClockStatus };
+
 export type DashboardData = {
   registration: Registration;
   status: StatusResponse["status"];
   power: PowerOverviewResponse;
+  clock: ClockStatus;
 };

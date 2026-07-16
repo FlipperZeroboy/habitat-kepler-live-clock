@@ -25,9 +25,9 @@ export function useDashboard(api: HabitatApi = habitatApi) {
         setState({ data: null, registered: false, loading: false, mutating: null, error: null });
         return;
       }
-      const [status, power] = await Promise.all([api.status(), api.powerOverview()]);
+      const [status, power, clockStatus] = await Promise.all([api.status(), api.powerOverview(), api.clockStatus()]);
       setState({
-        data: { registration: registrationResponse.registration, status: status.status, power },
+        data: { registration: registrationResponse.registration, status: status.status, power, clock: clockStatus.clock },
         registered: true,
         loading: false,
         mutating: null,
