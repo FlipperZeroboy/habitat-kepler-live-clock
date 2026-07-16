@@ -72,6 +72,33 @@ test("stops after a tick failure and reports the error", async () => {
   expect(clearCalls).toBe(1);
 });
 
+test("stops after a rejected tick promise and reports the error", async () => {
+  let clearCalls = 0;
+  const rejection = new Error("Backend request failed with HTTP 409.");
+  let reportedError: unknown;
+
+  const scheduler = createAutoTickScheduler({
+    tick: async () => {
+      throw rejection;
+    },
+    isManualAllowed: () => true,
+    onError: (error) => {
+      reportedError = error;
+    },
+    setIntervalImpl: () => 1 as ReturnType<typeof setInterval>,
+    clearIntervalImpl: () => {
+      clearCalls += 1;
+    },
+  });
+
+  scheduler.start();
+  await Promise.resolve();
+
+  expect(scheduler.running()).toBe(false);
+  expect(reportedError).toBe(rejection);
+  expect(clearCalls).toBe(1);
+});
+
 test("skips overlapping interval callbacks while a tick is still running", async () => {
   let intervalCallback: (() => void) | undefined;
   let resolveTick: ((value: boolean) => void) | undefined;

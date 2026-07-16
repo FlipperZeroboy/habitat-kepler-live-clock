@@ -10,8 +10,40 @@ type DashboardState = {
   error: string | null;
 };
 
+type DashboardMutationResult =
+  | { ok: true }
+  | { ok: false; errorMessage: string };
+
 function messageFor(error: unknown) {
   return error instanceof Error ? error.message : "Habitat backend request failed.";
+}
+
+export async function runDashboardMutation({
+  operation,
+  refresh,
+  refreshOnError = false,
+}: {
+  operation: () => Promise<unknown>;
+  refresh: () => Promise<void>;
+  refreshOnError?: boolean;
+}): Promise<DashboardMutationResult> {
+  try {
+    await operation();
+    await refresh();
+    return { ok: true };
+  } catch (error) {
+    const errorMessage = messageFor(error);
+
+    if (refreshOnError) {
+      try {
+        await refresh();
+      } catch {
+        // Keep the original mutation failure for callers and existing UI flows.
+      }
+    }
+
+    return { ok: false, errorMessage };
+  }
 }
 
 export function useDashboard(api: HabitatApi = habitatApi) {
@@ -38,22 +70,33 @@ export function useDashboard(api: HabitatApi = habitatApi) {
     }
   }, [api]);
 
-  const mutate = useCallback(async (label: string, operation: () => Promise<unknown>) => {
+  const mutate = useCallback(async (
+    label: string,
+    operation: () => Promise<unknown>,
+    options?: { refreshOnError?: boolean },
+  ) => {
     setState((current) => ({ ...current, mutating: label, error: null }));
-    try {
-      await operation();
-      await refresh();
-      return true;
-    } catch (error) {
-      setState((current) => ({ ...current, mutating: null, error: messageFor(error) }));
+    const result = await runDashboardMutation({
+      operation,
+      refresh,
+      refreshOnError: options?.refreshOnError ?? false,
+    });
+
+    if (!result.ok) {
+      setState((current) => ({ ...current, mutating: null, error: result.errorMessage }));
       return false;
     }
+
+    return true;
   }, [refresh]);
 
   const register = useCallback((displayName: string) => mutate("register", () => api.register(displayName)), [api, mutate]);
   const unregister = useCallback(() => mutate("unregister", () => api.unregister()), [api, mutate]);
   const setModuleStatus = useCallback((moduleId: string, status: "offline" | "online") => mutate(`module:${moduleId}`, () => api.updateModule(moduleId, status)), [api, mutate]);
-  const advanceTicks = useCallback((count: number) => mutate(`tick:${count}`, () => api.tick(count)), [api, mutate]);
+  const advanceTicks = useCallback(
+    (count: number) => mutate(`tick:${count}`, () => api.tick(count), { refreshOnError: true }),
+    [api, mutate],
+  );
 
   return { ...state, refresh, register, unregister, setModuleStatus, advanceTicks };
 }
