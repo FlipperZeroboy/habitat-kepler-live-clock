@@ -1,7 +1,7 @@
 import { access, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import type { HabitatModule, LocalRegistration, PowerSummary } from "./habitat";
+import type { ClockState, HabitatModule, LocalRegistration, PowerSummary, StreamMetadata } from "./habitat";
 
 export type LocalStateStore = {
   load(): Promise<LocalRegistration | null>;
@@ -24,6 +24,7 @@ function normalizePowerSummary(summary?: Partial<PowerSummary>): PowerSummary {
 }
 
 function normalizeRegistration(registration: Partial<LocalRegistration>, modules: HabitatModule[]): LocalRegistration {
+  const clock = registration.clock;
   return {
     habitatUuid: registration.habitatUuid ?? "",
     habitatId: registration.habitatId ?? "",
@@ -35,6 +36,20 @@ function normalizeRegistration(registration: Partial<LocalRegistration>, modules
     ...(registration.contracts ? { contracts: registration.contracts } : {}),
     ...(registration.evaState ? { evaState: registration.evaState } : {}),
     ...(registration.alerts ? { alerts: registration.alerts } : {}),
+    ...(typeof registration.streamUrl === "string" ? { streamUrl: registration.streamUrl } : {}),
+    ...(typeof registration.apiToken === "string" ? { apiToken: registration.apiToken } : {}),
+    ...(registration.stream ? { stream: registration.stream } : {}),
+    ...(clock ? {
+      clock: {
+        mode: clock.mode === "kepler" ? "kepler" : "manual",
+        connected: clock.connected === true,
+        lastKeplerTick: typeof clock.lastKeplerTick === "number" ? clock.lastKeplerTick : null,
+        lastAdvancedBy: typeof clock.lastAdvancedBy === "number" ? clock.lastAdvancedBy : null,
+        lastConnectedAt: typeof clock.lastConnectedAt === "string" ? clock.lastConnectedAt : null,
+        lastMessageAt: typeof clock.lastMessageAt === "string" ? clock.lastMessageAt : null,
+        lastConnectionError: typeof clock.lastConnectionError === "string" ? clock.lastConnectionError : null,
+      },
+    } : {}),
     blueprints: [],
     modules,
     powerSummary: normalizePowerSummary(registration.powerSummary),
@@ -57,6 +72,10 @@ function initializeDatabase(db: Database) {
       ,alert_contract_json TEXT
       ,eva_state_json TEXT
       ,alerts_json TEXT
+      ,stream_url TEXT
+      ,api_token TEXT
+      ,stream_json TEXT
+      ,clock_json TEXT
     );
 
     CREATE TABLE IF NOT EXISTS modules (
@@ -79,6 +98,10 @@ function initializeDatabase(db: Database) {
     "ALTER TABLE habitat_state ADD COLUMN alert_contract_json TEXT",
     "ALTER TABLE habitat_state ADD COLUMN eva_state_json TEXT",
     "ALTER TABLE habitat_state ADD COLUMN alerts_json TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN stream_url TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN api_token TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN stream_json TEXT",
+    "ALTER TABLE habitat_state ADD COLUMN clock_json TEXT",
   ]) {
     try {
       db.exec(statement);
@@ -135,6 +158,10 @@ function createSqliteLocalStateStore(cwd: string): LocalStateStore {
               : undefined,
             evaState: state.eva_state_json ? JSON.parse(String(state.eva_state_json)) : undefined,
             alerts: state.alerts_json ? JSON.parse(String(state.alerts_json)) : undefined,
+            streamUrl: state.stream_url ? String(state.stream_url) : undefined,
+            apiToken: state.api_token ? String(state.api_token) : undefined,
+            stream: state.stream_json ? JSON.parse(String(state.stream_json)) as StreamMetadata : undefined,
+            clock: state.clock_json ? JSON.parse(String(state.clock_json)) as ClockState : undefined,
             powerSummary: JSON.parse(String(state.power_summary_json)),
             tickHistory: JSON.parse(String(state.tick_history_json)),
           },
@@ -166,8 +193,8 @@ function createSqliteLocalStateStore(cwd: string): LocalStateStore {
           db.query("DELETE FROM modules").run();
           db.query(`
             INSERT INTO habitat_state
-              (id, habitat_uuid, habitat_id, display_name, registered_at, current_tick, power_summary_json, tick_history_json, starter_humans_json, alert_contract_json, eva_state_json, alerts_json)
-            VALUES (1, $habitatUuid, $habitatId, $displayName, $registeredAt, $currentTick, $powerSummary, $tickHistory, $starterHumans, $alertContract, $evaState, $alerts)
+              (id, habitat_uuid, habitat_id, display_name, registered_at, current_tick, power_summary_json, tick_history_json, starter_humans_json, alert_contract_json, eva_state_json, alerts_json, stream_url, api_token, stream_json, clock_json)
+            VALUES (1, $habitatUuid, $habitatId, $displayName, $registeredAt, $currentTick, $powerSummary, $tickHistory, $starterHumans, $alertContract, $evaState, $alerts, $streamUrl, $apiToken, $stream, $clock)
           `).run({
             $habitatUuid: localRegistration.habitatUuid,
             $habitatId: localRegistration.habitatId,
@@ -180,6 +207,10 @@ function createSqliteLocalStateStore(cwd: string): LocalStateStore {
               : null,
             $evaState: localRegistration.evaState ? JSON.stringify(localRegistration.evaState) : null,
             $alerts: localRegistration.alerts ? JSON.stringify(localRegistration.alerts) : null,
+            $streamUrl: localRegistration.streamUrl ?? null,
+            $apiToken: localRegistration.apiToken ?? null,
+            $stream: localRegistration.stream ? JSON.stringify(localRegistration.stream) : null,
+            $clock: localRegistration.clock ? JSON.stringify(localRegistration.clock) : null,
             $powerSummary: JSON.stringify(localRegistration.powerSummary),
             $tickHistory: JSON.stringify(localRegistration.tickHistory),
           });

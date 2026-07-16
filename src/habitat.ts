@@ -55,6 +55,27 @@ export type EvaState = {
   maxCarryCapacityKg: number;
 };
 
+export type ClockMode = "manual" | "kepler";
+
+export type StreamMetadata = {
+  protocolVersion: string;
+  subscriptions: string[];
+  currentTick: number;
+  tickIntervalMs: number;
+  ticksPerPulse: number;
+  status: "paused" | "running" | string;
+};
+
+export type ClockState = {
+  mode: ClockMode;
+  connected: boolean;
+  lastKeplerTick: number | null;
+  lastAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastConnectionError: string | null;
+};
+
 export type ProductionBlueprint = {
   id?: string;
   blueprintId: string;
@@ -234,6 +255,10 @@ export type LocalRegistration = {
   powerSummary: PowerSummary;
   tickHistory: TickSummary[];
   alerts?: HabitatAlert[];
+  streamUrl?: string;
+  apiToken?: string;
+  stream?: StreamMetadata;
+  clock?: ClockState;
 };
 
 export type HabitatStatus = {
@@ -594,6 +619,20 @@ export async function registerHabitat(name: string, options: RegisterOptions = {
     displayName: name,
     registeredAt,
     currentTick: 0,
+    streamUrl: body.streamUrl,
+    apiToken: body.apiToken,
+    stream: body.stream,
+    ...(body.streamUrl && body.apiToken && body.stream ? {
+      clock: {
+        mode: "manual",
+        connected: false,
+        lastKeplerTick: null,
+        lastAdvancedBy: null,
+        lastConnectedAt: null,
+        lastMessageAt: null,
+        lastConnectionError: null,
+      },
+    } : {}),
     starterModules,
     starterHumans: hydrateStarterHumans(body.starterHumans),
     contracts: body.contracts?.alerts
@@ -1001,12 +1040,100 @@ export async function showBlueprint(id: string, options: RuntimeOptions = {}) {
 
 export async function getLocalStatusSummary(options: RuntimeOptions = {}) {
   const { registration } = await loadRequiredRegistration(options);
-
-  return {
+  const summary = {
     currentTick: registration.currentTick,
     moduleCount: registration.modules.length,
     powerSummary: registration.powerSummary,
   };
+  if (!registration.streamUrl && !registration.apiToken && !registration.stream && !registration.clock) {
+    return summary;
+  }
+  return {
+    ...summary,
+    streamUrl: registration.streamUrl ?? null,
+    apiToken: registration.apiToken ?? null,
+    stream: registration.stream ?? null,
+    clock: registration.clock ?? createDefaultClockState(),
+  };
+}
+
+export function createDefaultClockState(): ClockState {
+  return {
+    mode: "manual",
+    connected: false,
+    lastKeplerTick: null,
+    lastAdvancedBy: null,
+    lastConnectedAt: null,
+    lastMessageAt: null,
+    lastConnectionError: null,
+  };
+}
+
+export async function getClockState(options: RuntimeOptions = {}): Promise<ClockState> {
+  const { registration } = await loadRequiredRegistration(options);
+  return registration.clock ?? createDefaultClockState();
+}
+
+export async function setClockListening(enabled: boolean, options: RuntimeOptions = {}): Promise<ClockState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  registration.clock = {
+    ...(registration.clock ?? createDefaultClockState()),
+    mode: enabled ? "kepler" : "manual",
+    connected: false,
+    lastConnectionError: null,
+  };
+  await saveLocalRegistration(cwd, registration);
+  return registration.clock;
+}
+
+export async function recordClockConnection(options: RuntimeOptions = {}): Promise<ClockState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  registration.clock = {
+    ...(registration.clock ?? createDefaultClockState()),
+    connected: true,
+    lastConnectedAt: new Date().toISOString(),
+    lastConnectionError: null,
+  };
+  await saveLocalRegistration(cwd, registration);
+  return registration.clock;
+}
+
+export async function recordClockError(message: string, options: RuntimeOptions = {}): Promise<ClockState> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  registration.clock = {
+    ...(registration.clock ?? createDefaultClockState()),
+    connected: false,
+    lastConnectionError: message,
+  };
+  await saveLocalRegistration(cwd, registration);
+  return registration.clock;
+}
+
+export async function applyKeplerTick(
+  tick: number,
+  advancedBy: number,
+  messageAt: string,
+  options: RuntimeOptions = {},
+): Promise<TickSummary | null> {
+  const { cwd, registration } = await loadRequiredRegistration(options);
+  const clock = registration.clock ?? createDefaultClockState();
+  if (clock.mode !== "kepler") return null;
+  if (!Number.isInteger(advancedBy) || advancedBy <= 0) {
+    throw new Error("Kepler advancedBy must be a positive integer.");
+  }
+
+  const summary = await tickHabitat(advancedBy, options);
+  const freshRegistration = await loadLocalRegistration(cwd);
+  if (!freshRegistration) return summary;
+  freshRegistration.clock = {
+    ...(freshRegistration.clock ?? createDefaultClockState()),
+    lastKeplerTick: tick,
+    lastAdvancedBy: advancedBy,
+    lastMessageAt: messageAt,
+    lastConnectionError: null,
+  };
+  await saveLocalRegistration(cwd, freshRegistration);
+  return summary;
 }
 
 function numericAttribute(value: unknown) {

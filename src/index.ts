@@ -5,7 +5,7 @@ import pkg from "../package.json";
 import {
   checkLocalConfig,
 } from "./habitat";
-import { createApiClient, type RegistrationResponse, type StatusResponse, type TickResponse } from "./api-client";
+import { createApiClient, type ClockStatusResponse, type RegistrationResponse, type StatusResponse, type TickResponse } from "./api-client";
 import { createBlueprintCommand } from "./commands/blueprint";
 import { createConstructCommand } from "./commands/construct";
 import { createConstructionCommand } from "./commands/construction";
@@ -45,6 +45,10 @@ Examples:
   habitat config
   habitat solar status
   habitat tick 60
+  habitat clock status
+  habitat clock listen on
+  habitat clock listen off
+  habitat clock watch
   habitat power overview
   habitat power status
   habitat blueprint list
@@ -102,9 +106,14 @@ program
 program
   .command("status")
   .description("Show this habitat registration and local state status.")
-  .action(async () => {
+  .option("--json", "Print status as JSON")
+  .action(async (options: { json?: boolean }) => {
     try {
       const response = await apiClient.get<StatusResponse>("/status");
+      if (options.json) {
+        console.log(JSON.stringify(response.status, null, 2));
+        return;
+      }
       const { habitat, currentTick, moduleCount, powerSummary } = response.status;
 
       console.log(`Habitat ID: ${habitat.id}`);
@@ -114,6 +123,9 @@ program
       console.log(`Status: ${habitat.status}`);
       console.log(`Last Seen: ${habitat.lastSeenAt ?? "never"}`);
       console.log(`Current Tick: ${currentTick}`);
+      console.log(`Stream URL: ${response.status.streamUrl ?? "not available"}`);
+      console.log(`Stream API Token: ${response.status.apiToken ?? "not available"}`);
+      console.log(`Clock Mode: ${response.status.clock?.mode ?? "manual"}`);
       console.log(`Modules: ${moduleCount}`);
       console.log(`Total Power Draw: ${formatNumber(powerSummary.totalPowerDrawKw)} kW`);
       console.log(
@@ -161,6 +173,79 @@ program
       }
     } catch (error) {
       printError(error);
+    }
+  });
+
+const clock = program.command("clock").description("Control Kepler live clock listening.");
+
+clock
+  .command("status")
+  .description("Show the persisted Habitat clock mode and connection state.")
+  .action(async () => {
+    try {
+      const { clock: state } = await apiClient.get<ClockStatusResponse>("/clock/status");
+      console.log(`Clock Mode: ${state.mode}`);
+      console.log(`Kepler Connected: ${state.connected ? "yes" : "no"}`);
+      console.log(`Last Kepler Tick: ${state.lastKeplerTick ?? "never"}`);
+      console.log(`Last Advanced By: ${state.lastAdvancedBy ?? "never"}`);
+      console.log(`Last Connected: ${state.lastConnectedAt ?? "never"}`);
+      console.log(`Last Message: ${state.lastMessageAt ?? "never"}`);
+      console.log(`Last Connection Error: ${state.lastConnectionError ?? "none"}`);
+    } catch (error) {
+      printError(error);
+    }
+  });
+
+const listen = clock.command("listen").description("Enable or disable Kepler tick listening.");
+
+for (const [name, enabled] of [["on", true], ["off", false]] as const) {
+  listen
+    .command(name)
+    .description(`${enabled ? "Enable" : "Disable"} Kepler tick listening.`)
+    .action(async () => {
+      try {
+        const response = await apiClient.post<ClockStatusResponse>("/clock/listen", { enabled });
+        console.log(`Clock listening: ${response.clock.mode}`);
+      } catch (error) {
+        printError(error);
+      }
+    });
+}
+
+clock
+  .command("watch")
+  .description("Watch future Kepler ticks applied by the local Habitat backend.")
+  .action(async () => {
+    const abortController = new AbortController();
+    const stop = () => abortController.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      const response = await fetch(`${apiClient.baseUrl}/clock/watch`, { signal: abortController.signal });
+      if (!response.ok || !response.body) {
+        throw new Error(`Could not open the local Habitat clock watch (HTTP ${response.status}).`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const event of events) {
+          const data = event.split("\n").find((line) => line.startsWith("data: "));
+          if (data) console.log(data.slice(6));
+        }
+      }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        printError(error);
+      }
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
     }
   });
 

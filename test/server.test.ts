@@ -132,6 +132,59 @@ test("GET /status combines remote registration status with local state summary",
   });
 });
 
+test("clock routes persist mode and reject manual ticks while listening", async () => {
+  let mode: "manual" | "kepler" = "manual";
+  const clock = () => ({
+    mode,
+    connected: false,
+    lastKeplerTick: null,
+    lastAdvancedBy: null,
+    lastConnectedAt: null,
+    lastMessageAt: null,
+    lastConnectionError: null,
+  });
+  const app = createApp({
+    getClockState: async () => clock(),
+    setClockListening: async (enabled: boolean) => { mode = enabled ? "kepler" : "manual"; return clock(); },
+    startClockListener: async () => {},
+    stopClockListener: () => {},
+    tickHabitat: async () => { throw new Error("manual tick should not run"); },
+  });
+
+  expect(await (await app.request("/clock/status")).json()).toEqual({ clock: clock() });
+  expect(await (await app.request("/clock/listen", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }),
+  })).json()).toEqual({ clock: clock() });
+  const rejected = await app.request("/ticks", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ count: 1 }),
+  });
+  expect(rejected.status).toBe(409);
+  expect(await rejected.json()).toEqual({ error: { message: "Manual ticks are unavailable while Kepler listening is enabled. Run `habitat clock listen off` first." } });
+});
+
+test("GET /status reveals the saved stream credentials without putting them in logs", async () => {
+  const logLines: string[] = [];
+  const app = createApp({
+    logger: (line) => logLines.push(line),
+    getRegistrationStatus: async () => ({ habitat: { id: "habitat-1", habitatSlug: "artemis", displayName: "Artemis", catalogVersion: "v1", status: "active" } }),
+    getLocalStatusSummary: async () => ({
+      currentTick: 800,
+      moduleCount: 2,
+      powerSummary: { totalPowerDrawKw: 0, energyUsedKwh: 0, batteryEnergyKwh: 0, batteryCapacityKwh: 0, powerShortageKwh: 0 },
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      apiToken: "habitat-stream-token",
+      stream: { protocolVersion: "1.0", subscriptions: ["ticks"], currentTick: 800, tickIntervalMs: 1000, ticksPerPulse: 1, status: "running" },
+      clock: { mode: "manual", connected: false, lastKeplerTick: null, lastAdvancedBy: null, lastConnectedAt: null, lastMessageAt: null, lastConnectionError: null },
+    }),
+  });
+
+  const response = await app.request("/status");
+  const body = await response.json();
+  expect(body.status.apiToken).toBe("habitat-stream-token");
+  expect(body.status.streamUrl).toBe("wss://planet.turingguild.com/planet/stream");
+  expect(logLines.join("\n")).not.toContain("habitat-stream-token");
+});
+
 test("GET /humans returns starter humans from local registration state", async () => {
   const app = createApp({
     listHumans: async () => [

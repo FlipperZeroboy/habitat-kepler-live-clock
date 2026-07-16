@@ -13,6 +13,8 @@ import type {
   EvaState,
   CollectionResult,
   HabitatAlert,
+  ClockState,
+  StreamMetadata,
 } from "./habitat";
 
 export type ApiRegistration = {
@@ -46,8 +48,13 @@ export type StatusResponse = {
       batteryCapacityKwh: number;
       powerShortageKwh: number;
     };
+    streamUrl: string | null;
+    apiToken: string | null;
+    stream: StreamMetadata | null;
+    clock: ClockState;
   };
 };
+export type ClockStatusResponse = { clock: ClockState };
 
 export type ModulesResponse = { modules: HabitatModule[] };
 export type HumansResponse = { humans: StarterHuman[] };

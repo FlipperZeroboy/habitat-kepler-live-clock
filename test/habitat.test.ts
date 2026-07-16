@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   addInventoryResource,
+  applyKeplerTick,
   acknowledgeAlert,
   cancelConstructionJob,
   checkLocalConfig,
@@ -18,6 +19,7 @@ import {
   moveExplorer,
   dryRunConstruction,
   getLocalStatusSummary,
+  getClockState,
   getDatabaseFilePath,
   getRegistrationStatus,
   getSolarIrradiance,
@@ -32,6 +34,7 @@ import {
   removeInventoryResource,
   scanHabitat,
   setModuleStatus,
+  setClockListening,
   showBlueprint,
   showModule,
   startConstruction,
@@ -341,6 +344,16 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     return new Response(
       JSON.stringify({
         habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        apiToken: "habitat-stream-token",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks"],
+          currentTick: 800,
+          tickIntervalMs: 1000,
+          ticksPerPulse: 1,
+          status: "running",
+        },
         contracts: {
           alerts: {
             schemaVersion: "1.0",
@@ -419,6 +432,25 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     displayName: "Artemis Ridge",
     registeredAt: "2026-07-06T12:00:00.000Z",
     currentTick: 0,
+    streamUrl: "wss://planet.turingguild.com/planet/stream",
+    apiToken: "habitat-stream-token",
+    stream: {
+      protocolVersion: "1.0",
+      subscriptions: ["ticks"],
+      currentTick: 800,
+      tickIntervalMs: 1000,
+      ticksPerPulse: 1,
+      status: "running",
+    },
+    clock: {
+      mode: "manual",
+      connected: false,
+      lastKeplerTick: null,
+      lastAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastConnectionError: null,
+    },
     starterHumans: [
       { id: "human-1", displayName: "Abigail", locationModuleId: "module-1" },
       { id: "human-2", displayName: "Adam", locationModuleId: "module-1" },
@@ -471,6 +503,36 @@ test("registerHabitat sends OpenAPI request keys and persists returned registrat
     ...registration,
     starterModules: [],
     blueprints: [],
+  });
+});
+
+test("Kepler clock mode persists and applies the notice advancedBy amount exactly", async () => {
+  await registerHabitat("Artemis Ridge", {
+    cwd: tempDir,
+    fetchImpl: async () => new Response(JSON.stringify({
+      habitatId: "habitat-1",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      apiToken: "habitat-stream-token",
+      stream: { protocolVersion: "1.0", subscriptions: ["ticks"], currentTick: 0, tickIntervalMs: 1000, ticksPerPulse: 1, status: "running" },
+      starterModules: [],
+      starterHumans: [],
+      blueprints: [],
+    }), { status: 201 }),
+  });
+
+  expect((await getClockState({ cwd: tempDir })).mode).toBe("manual");
+  await setClockListening(true, { cwd: tempDir });
+  const result = await applyKeplerTick(810, 10, "2026-07-16T12:00:00.000Z", {
+    cwd: tempDir,
+    fetchImpl: async () => new Response(JSON.stringify({ solarIrradiance: { wPerM2: 0, condition: "night" } })),
+  });
+
+  expect(result?.ticksAdvanced).toBe(10);
+  expect((await loadLocalRegistration(tempDir))?.clock).toMatchObject({
+    mode: "kepler",
+    lastKeplerTick: 810,
+    lastAdvancedBy: 10,
+    lastMessageAt: "2026-07-16T12:00:00.000Z",
   });
 });
 

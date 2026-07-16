@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   getLocalStatusSummary,
+  getClockState,
   getRegistrationStatus,
   getSolarIrradiance,
   addInventoryResource,
@@ -31,6 +32,11 @@ import {
   showBlueprint,
   showModule,
   tickHabitat,
+  setClockListening,
+  applyKeplerTick,
+  recordClockConnection,
+  recordClockError,
+  type ClockState,
   unregisterHabitat,
   updateModule,
   cancelConstructionJob,
@@ -54,6 +60,7 @@ import {
   type TickSummary,
   type WorldScanOptions,
 } from "./habitat";
+import { createKeplerStream, type KeplerStream, type PlanetTickMessage } from "./kepler-stream";
 
 declare const Bun: {
   serve(options: {
@@ -75,6 +82,10 @@ type AppOptions = {
   registerHabitat?: (name: string) => Promise<RegistrationSource>;
   getRegistrationStatus?: () => Promise<HabitatStatus>;
   getLocalStatusSummary?: typeof getLocalStatusSummary;
+  getClockState?: typeof getClockState;
+  setClockListening?: typeof setClockListening;
+  startClockListener?: () => Promise<void>;
+  stopClockListener?: () => void;
   unregisterHabitat?: () => Promise<{ habitatId: string }>;
   listBlueprintCatalog?: () => Promise<{ catalogVersion: string; blueprints: ProductionBlueprint[] }>;
   showBlueprint?: (blueprintId: string) => Promise<ProductionBlueprint>;
@@ -107,6 +118,7 @@ type AppOptions = {
 
 type RegistrationSource = Pick<LocalRegistration, "habitatUuid" | "habitatId" | "displayName"> & {
   apiToken?: string;
+  streamUrl?: string;
 };
 
 export type ServerConfig = {
@@ -152,6 +164,8 @@ export function createApp(options: AppOptions = {}) {
   const register = options.registerHabitat ?? ((name) => registerHabitat(name, { fetchImpl: keplerFetch }));
   const getStatus = options.getRegistrationStatus ?? (() => getRegistrationStatus({ fetchImpl: keplerFetch }));
   const getLocalSummary = options.getLocalStatusSummary ?? getLocalStatusSummary;
+  const getClock = options.getClockState ?? getClockState;
+  const updateClockListening = options.setClockListening ?? setClockListening;
   const unregister = options.unregisterHabitat ?? (() => unregisterHabitat({ fetchImpl: keplerFetch }));
   const getBlueprintCatalog = options.listBlueprintCatalog ?? (() => listBlueprintCatalog({ fetchImpl: keplerFetch }));
   const getBlueprint = options.showBlueprint ?? ((blueprintId) => showBlueprint(blueprintId, { fetchImpl: keplerFetch }));
@@ -181,6 +195,51 @@ export function createApp(options: AppOptions = {}) {
   const cancelConstruction = options.cancelConstructionJob ?? cancelConstructionJob;
   const scan = options.scanHabitat ?? ((scanOptions: Omit<WorldScanOptions, "cwd" | "fetchImpl" | "projectRoot">) =>
     scanHabitat({ ...scanOptions, fetchImpl: keplerFetch }));
+
+  let keplerStream: KeplerStream | null = null;
+  const watchSubscribers = new Set<(event: Record<string, unknown>) => void>();
+
+  const stopClockListenerInternal = () => {
+    keplerStream?.stop();
+    keplerStream = null;
+  };
+
+  const startClockListenerInternal = async () => {
+    if (keplerStream) return;
+    const registration = await loadLocalRegistration();
+    if (!registration?.streamUrl || !registration.apiToken) {
+      throw new Error("No Kepler stream credentials are saved. Register the habitat again.");
+    }
+    keplerStream = createKeplerStream({
+      streamUrl: registration.streamUrl,
+      apiToken: registration.apiToken,
+      onConnected: async () => { await recordClockConnection(); },
+      onError: async (message) => { await recordClockError(message); },
+      onMessage: async (notice: PlanetTickMessage) => {
+        const clock = await getClock();
+        if (clock.mode !== "kepler") return;
+        const summary = await applyKeplerTick(notice.tick, notice.advancedBy, notice.issuedAt);
+        if (!summary) return;
+        const event = {
+          type: "planet_tick",
+          tick: notice.tick,
+          advancedBy: notice.advancedBy,
+          currentTick: summary.currentTick,
+          issuedAt: notice.issuedAt,
+        };
+        for (const subscriber of watchSubscribers) subscriber(event);
+      },
+    });
+    keplerStream.start();
+  };
+
+  const startClockListener = options.startClockListener ?? startClockListenerInternal;
+  const stopClockListener = options.stopClockListener ?? stopClockListenerInternal;
+
+  const ensureClockListener = async () => {
+    const clock = await getClock();
+    if (clock.mode === "kepler") await startClockListener();
+  };
 
   app.use("*", async (context, next) => {
     await next();
@@ -240,6 +299,48 @@ export function createApp(options: AppOptions = {}) {
       status: {
         habitat: remoteStatus.habitat,
         ...localSummary,
+      },
+    });
+  });
+
+  app.get("/clock/status", async (context) => {
+    const clock = await getClock();
+    context.set("logSummary", `clock ${clock.mode}`);
+    return context.json({ clock });
+  });
+
+  app.post("/clock/listen", async (context) => {
+    const body = await readJsonBody(context);
+    if (typeof body.enabled !== "boolean") {
+      return context.json({ error: { message: "clock listening enabled must be a boolean" } }, 400);
+    }
+    const clock = await updateClockListening(body.enabled);
+    if (body.enabled) {
+      await startClockListener();
+    } else {
+      stopClockListener();
+    }
+    context.set("logSummary", `clock ${clock.mode}`);
+    return context.json({ clock });
+  });
+
+  app.get("/clock/watch", async () => {
+    const encoder = new TextEncoder();
+    let subscriber: ((event: Record<string, unknown>) => void) | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        subscriber = (event) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        watchSubscribers.add(subscriber);
+      },
+      cancel() {
+        if (subscriber) watchSubscribers.delete(subscriber);
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
       },
     });
   });
@@ -444,6 +545,13 @@ export function createApp(options: AppOptions = {}) {
       return context.json({ error: { message: "tick count must be a positive integer" } }, 400);
     }
 
+    const clock = await getClock();
+    if (clock.mode === "kepler") {
+      return context.json({
+        error: { message: "Manual ticks are unavailable while Kepler listening is enabled. Run `habitat clock listen off` first." },
+      }, 409);
+    }
+
     const tick = await advanceTicks(count);
     context.set("logSummary", `${count} ticks advanced`);
     return context.json({ tick });
@@ -481,6 +589,8 @@ export function createApp(options: AppOptions = {}) {
     app.use("/*", serveStatic({ root: "./web/dist" }));
     app.get("/*", serveStatic({ path: "./web/dist/index.html" }));
   }
+
+  void ensureClockListener().catch(() => undefined);
 
   return app;
 }
