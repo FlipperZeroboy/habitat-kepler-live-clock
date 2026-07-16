@@ -21,6 +21,11 @@ import { createScanCommand } from "./commands/scan";
 import { createSolarCommand } from "./commands/solar";
 import { formatNumber, parseTickCount, printError } from "./cli-utils";
 
+const globalJsonRequested = process.argv[2] === "--json";
+if (globalJsonRequested) {
+  process.argv.splice(2, 1);
+}
+
 const program = new Command();
 const apiClient = createApiClient();
 
@@ -110,7 +115,7 @@ program
   .action(async (options: { json?: boolean }) => {
     try {
       const response = await apiClient.get<StatusResponse>("/status");
-      if (options.json) {
+      if (options.json || globalJsonRequested) {
         console.log(JSON.stringify(response.status, null, 2));
         return;
       }
@@ -193,7 +198,7 @@ clock
   .action(async (options: { json?: boolean }) => {
     try {
       const { clock: state } = await apiClient.get<ClockStatusResponse>("/clock/status");
-      if (options.json) {
+      if (options.json || globalJsonRequested) {
         console.log(JSON.stringify(state, null, 2));
         return;
       }
