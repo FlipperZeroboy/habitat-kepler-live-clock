@@ -43,8 +43,10 @@ export function useDashboard(api: HabitatApi = habitatApi) {
     try {
       await operation();
       await refresh();
+      return true;
     } catch (error) {
       setState((current) => ({ ...current, mutating: null, error: messageFor(error) }));
+      return false;
     }
   }, [refresh]);
 

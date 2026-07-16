@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { AutoTickControl } from "../web/src/App";
 import { createAutoTickScheduler } from "../web/src/use-auto-tick";
 
 test("runs one immediate tick and one tick per interval", async () => {
@@ -98,4 +101,40 @@ test("skips overlapping interval callbacks while a tick is still running", async
 
   resolveTick?.(true);
   await Promise.resolve();
+});
+
+test("renders auto-tick control with manual mode and start action", () => {
+  const html = renderToStaticMarkup(
+    createElement(AutoTickControl, {
+      mode: "manual",
+      manualTicksAllowed: true,
+      mutating: false,
+      running: false,
+      onToggle: () => {},
+    }),
+  );
+
+  expect(html).toContain("Clock mode: Manual");
+  expect(html).toContain("Auto Tick off");
+  expect(html).toContain("One in-game tick per second");
+  expect(html).toContain("Start Auto Tick");
+  expect(html).not.toContain("disabled");
+});
+
+test("renders disabled auto-tick control while Kepler listening is on", () => {
+  const html = renderToStaticMarkup(
+    createElement(AutoTickControl, {
+      mode: "kepler",
+      manualTicksAllowed: false,
+      mutating: false,
+      running: true,
+      onToggle: () => {},
+    }),
+  );
+
+  expect(html).toContain("Clock mode: Kepler");
+  expect(html).toContain("Auto Tick on");
+  expect(html).toContain("Unavailable while Kepler listening is on");
+  expect(html).toContain("Stop Auto Tick");
+  expect(html).toContain("disabled");
 });
