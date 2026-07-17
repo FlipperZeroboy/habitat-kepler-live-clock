@@ -160,6 +160,43 @@ test("ignores interval callbacks after the scheduler is stopped", async () => {
   expect(scheduler.running()).toBe(false);
 });
 
+test("ignores stale async tick failures from an older start-stop session", async () => {
+  let intervalCallback: (() => void) | undefined;
+  const tickResults: Array<(value: boolean) => void> = [];
+  const errors: unknown[] = [];
+
+  const scheduler = createAutoTickScheduler({
+    tick: () =>
+      new Promise<boolean>((resolve) => {
+        tickResults.push(resolve);
+      }),
+    isManualAllowed: () => true,
+    onError: (error) => {
+      errors.push(error);
+    },
+    setIntervalImpl: (callback) => {
+      intervalCallback = callback;
+      return 1 as ReturnType<typeof setInterval>;
+    },
+    clearIntervalImpl: () => {},
+  });
+
+  scheduler.start();
+  scheduler.stop();
+  scheduler.start();
+
+  tickResults[0]?.(false);
+  await Promise.resolve();
+
+  expect(errors).toEqual([]);
+  expect(scheduler.running()).toBe(true);
+
+  intervalCallback?.();
+  await Promise.resolve();
+
+  expect(tickResults).toHaveLength(2);
+});
+
 test("renders auto-tick control with manual mode and start action", () => {
   const html = renderToStaticMarkup(
     createElement(AutoTickControl, {

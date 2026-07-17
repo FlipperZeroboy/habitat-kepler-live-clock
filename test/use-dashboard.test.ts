@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { createSharedTickOperationGuard, runDashboardMutation } from "../web/src/use-dashboard";
+import {
+  applyDashboardRefreshSuccess,
+  clearCompletedDashboardMutation,
+  createSharedTickOperationGuard,
+  runDashboardMutation,
+} from "../web/src/use-dashboard";
 
 test("refreshes after a failed tick and preserves the original error message", async () => {
   const calls: string[] = [];
@@ -84,4 +89,37 @@ test("shared tick operation guard reuses the in-flight tick promise for concurre
   const thirdTick = guardedTick(10);
   expect(thirdTick).not.toBe(firstTick);
   expect(counts).toEqual([60, 10]);
+});
+
+test("dashboard refresh success preserves the active mutation until the matching mutation completes", () => {
+  const refreshingState = {
+    data: null,
+    registered: null,
+    loading: true,
+    mutating: "tick:60",
+    error: "old error",
+  };
+
+  const refreshedState = applyDashboardRefreshSuccess(refreshingState, {
+    data: null,
+    registered: false,
+  });
+
+  expect(refreshedState).toEqual({
+    data: null,
+    registered: false,
+    loading: false,
+    mutating: "tick:60",
+    error: null,
+  });
+
+  expect(clearCompletedDashboardMutation(refreshedState, "module:alpha")).toBe(refreshedState);
+
+  expect(clearCompletedDashboardMutation(refreshedState, "tick:60")).toEqual({
+    data: null,
+    registered: false,
+    loading: false,
+    mutating: null,
+    error: null,
+  });
 });

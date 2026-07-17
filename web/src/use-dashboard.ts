@@ -18,6 +18,29 @@ function messageFor(error: unknown) {
   return error instanceof Error ? error.message : "Habitat backend request failed.";
 }
 
+export function applyDashboardRefreshSuccess(
+  current: DashboardState,
+  next: Pick<DashboardState, "data" | "registered">,
+): DashboardState {
+  return {
+    ...current,
+    ...next,
+    loading: false,
+    error: null,
+  };
+}
+
+export function clearCompletedDashboardMutation(
+  current: DashboardState,
+  label: string,
+): DashboardState {
+  if (current.mutating !== label) {
+    return current;
+  }
+
+  return { ...current, mutating: null };
+}
+
 export function createSharedTickOperationGuard<Args extends unknown[], Result>(
   operation: (...args: Args) => Promise<Result>,
 ) {
@@ -79,17 +102,14 @@ export function useDashboard(api: HabitatApi = habitatApi) {
     try {
       const registrationResponse = await api.registration();
       if (!registrationResponse.registration) {
-        setState({ data: null, registered: false, loading: false, mutating: null, error: null });
+        setState((current) => applyDashboardRefreshSuccess(current, { data: null, registered: false }));
         return;
       }
       const [status, power, clockStatus] = await Promise.all([api.status(), api.powerOverview(), api.clockStatus()]);
-      setState({
+      setState((current) => applyDashboardRefreshSuccess(current, {
         data: { registration: registrationResponse.registration, status: status.status, power, clock: clockStatus.clock },
         registered: true,
-        loading: false,
-        mutating: null,
-        error: null,
-      });
+      }));
     } catch (error) {
       setState((current) => ({ ...current, loading: false, error: messageFor(error) }));
       if (options?.throwOnError) {
@@ -121,6 +141,7 @@ export function useDashboard(api: HabitatApi = habitatApi) {
       return false;
     }
 
+    setState((current) => clearCompletedDashboardMutation(current, label));
     return true;
   }, [refresh]);
 

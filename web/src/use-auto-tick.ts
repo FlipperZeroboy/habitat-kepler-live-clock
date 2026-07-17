@@ -21,50 +21,66 @@ export function createAutoTickScheduler(options: AutoTickSchedulerOptions): Auto
   const clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
 
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
-  let running = false;
-  let inFlight = false;
+  let activeSessionToken: number | null = null;
+  let nextSessionToken = 0;
+  let inFlightSessionToken: number | null = null;
 
-  function stopInternal() {
+  function stopInternal(sessionToken = activeSessionToken) {
+    if (sessionToken === null || activeSessionToken !== sessionToken) {
+      return;
+    }
+
     if (intervalHandle !== null) {
       clearIntervalImpl(intervalHandle);
       intervalHandle = null;
     }
-    running = false;
+    activeSessionToken = null;
   }
 
-  async function runTick() {
-    if (!running || inFlight) {
+  async function runTick(sessionToken: number) {
+    if (activeSessionToken !== sessionToken || inFlightSessionToken !== null) {
       return;
     }
 
-    inFlight = true;
+    inFlightSessionToken = sessionToken;
 
     try {
       const advanced = await options.tick();
+      if (activeSessionToken !== sessionToken) {
+        return;
+      }
+
       if (!advanced) {
-        stopInternal();
+        stopInternal(sessionToken);
         options.onError?.(new Error("Auto-tick stopped because the tick operation did not advance the Habitat clock."));
       }
     } catch (error) {
-      stopInternal();
+      if (activeSessionToken !== sessionToken) {
+        return;
+      }
+
+      stopInternal(sessionToken);
       options.onError?.(error);
     } finally {
-      inFlight = false;
+      if (inFlightSessionToken === sessionToken) {
+        inFlightSessionToken = null;
+      }
     }
   }
 
   return {
-    running: () => running,
+    running: () => activeSessionToken !== null,
     start: () => {
-      if (running || !options.isManualAllowed()) {
+      if (activeSessionToken !== null || !options.isManualAllowed()) {
         return;
       }
 
-      running = true;
+      const sessionToken = ++nextSessionToken;
+      activeSessionToken = sessionToken;
       intervalHandle = setIntervalImpl(() => {
-        void runTick();
+        void runTick(sessionToken);
       }, AUTO_TICK_INTERVAL_MS);
-      void runTick();
+      void runTick(sessionToken);
     },
     stop: () => {
       stopInternal();
